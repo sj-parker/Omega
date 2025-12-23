@@ -117,7 +117,8 @@ class LearningDecoder:
                         description=p.get("description", ""),
                         source_episodes=p.get("source_episodes", []),
                         confidence=p.get("confidence", 0.5),
-                        times_validated=p.get("times_validated", 0)
+                        times_validated=p.get("times_validated", 0),
+                        suggested_update=p.get("suggested_update")
                     )
                     self.patterns.append(pattern)
                     loaded += 1

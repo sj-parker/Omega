@@ -8,10 +8,11 @@ from typing import Optional
 import sys
 sys.path.insert(0, str(__file__).rsplit('\\', 2)[0])
 
-from models.schemas import EpisodeSummary, ExtractedPattern, PolicySpace
+from models.schemas import EpisodeSummary, ExtractedPattern, PolicySpace, PolicyUpdate
 from models.llm_interface import LLMInterface
 from learning.learning_decoder import LearningDecoder
 from learning.homeostasis import HomeostasisController
+from learning.impact_resolver import PatternImpactResolver
 
 
 REFLECTION_PROMPT = """You are a system reflection agent. Analyze these episodes and identify patterns.
@@ -53,6 +54,7 @@ class ReflectionController:
         self.learning_decoder = learning_decoder
         self.homeostasis = homeostasis
         self.llm = llm
+        self.impact_resolver = PatternImpactResolver(llm)
         
         self._running = False
         self._task: Optional[asyncio.Task] = None
@@ -137,6 +139,25 @@ class ReflectionController:
             pattern = self._simple_reflection(summaries)
         
         if pattern:
+            # New: Resolve and apply pattern impact
+            impact = await self.impact_resolver.resolve_impact(pattern)
+            pattern.suggested_update = impact
+            
+            # Apply policy deltas
+            if impact.get("policy_deltas"):
+                self.homeostasis.apply_update(PolicyUpdate(
+                    updates=impact["policy_deltas"],
+                    reason=f"Pattern impact: {pattern.description[:50]}..."
+                ))
+                if verbose:
+                    print(f"[Reflection] Applied policy deltas: {impact['policy_deltas']}")
+            
+            # Apply semantic rules
+            if impact.get("semantic_rules"):
+                self.homeostasis.policy.semantic_rules.update(impact["semantic_rules"])
+                if verbose:
+                    print(f"[Reflection] Updated semantic rules: {impact['semantic_rules']}")
+
             # Save pattern to disk
             self.learning_decoder.save_patterns()
             if verbose:

@@ -81,6 +81,9 @@ class PolicySpace:
     confidence_mean_range: tuple = (0.4, 0.9)
     expert_disagreement_range: tuple = (0.0, 0.6)
     
+    # Semantic rules (routing hints based on patterns)
+    semantic_rules: dict[str, str] = field(default_factory=dict)
+    
     def to_dict(self) -> dict:
         return {
             "fast_path_bias": self.fast_path_bias,
@@ -89,6 +92,7 @@ class PolicySpace:
             "memory_write_threshold": self.memory_write_threshold,
             "confidence_mean_range": list(self.confidence_mean_range),
             "expert_disagreement_range": list(self.expert_disagreement_range),
+            "semantic_rules": self.semantic_rules,
         }
 
     def apply_update(self, update: dict) -> None:
@@ -198,6 +202,7 @@ class ExtractedPattern:
     source_episodes: list[str] = field(default_factory=list)
     confidence: float = 0.5
     times_validated: int = 0
+    suggested_update: Optional[dict] = None  # Policy deltas or semantic rules
     
     def to_dict(self) -> dict:
         return {
@@ -206,6 +211,7 @@ class ExtractedPattern:
             "source_episodes": self.source_episodes,
             "confidence": self.confidence,
             "times_validated": self.times_validated,
+            "suggested_update": self.suggested_update,
         }
 
 

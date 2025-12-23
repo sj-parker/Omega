@@ -154,6 +154,16 @@ class OperationalModule:
         Deep path  → experts + critic (complex, low confidence)
         """
         
+        # New: Check semantic rules first (Maximal approach)
+        for rule_trigger, target_depth in self.policy.semantic_rules.items():
+            if rule_trigger in intent.lower() or rule_trigger in context.user_input.lower():
+                try:
+                    # Map string depth to Enum
+                    forced_depth = DecisionDepth(target_depth.lower())
+                    return forced_depth
+                except ValueError:
+                    pass
+        
         # Fast path conditions
         if intent == "smalltalk" and confidence > 0.7:
             return DecisionDepth.FAST
