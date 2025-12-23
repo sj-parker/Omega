@@ -1,0 +1,238 @@
+# Context Manager and Memory Gate
+# Context ≠ Memory. Context is a projection, not an archive.
+
+from datetime import datetime
+from typing import Optional
+from collections import deque
+
+import sys
+sys.path.insert(0, str(__file__).rsplit('\\', 2)[0])
+
+from models.schemas import (
+    UserIdentity, ContextEvent, ContextSlice, DecisionObject
+)
+
+
+class ShortContextStore:
+    """
+    Fast context (Short Context Store).
+    
+    Contains:
+    - Recent events
+    - Active goal
+    - Emotional and dialog status
+    - Current system mode
+    """
+    
+    def __init__(self, max_events: int = 20):
+        self.max_events = max_events
+        self.events: deque[ContextEvent] = deque(maxlen=max_events)
+        self.active_goal: Optional[str] = None
+        self.emotional_state: str = "neutral"
+        self.system_mode: str = "normal"
+    
+    def add_event(self, event: ContextEvent):
+        self.events.append(event)
+    
+    def get_recent_events(self, n: int = 10) -> list[ContextEvent]:
+        return list(self.events)[-n:]
+    
+    def set_goal(self, goal: str):
+        self.active_goal = goal
+    
+    def set_emotional_state(self, state: str):
+        self.emotional_state = state
+    
+    def set_mode(self, mode: str):
+        self.system_mode = mode
+
+
+class FullContextStore:
+    """
+    Full context store.
+    
+    Contains:
+    - All interaction history
+    - Multimodal events
+    - Decisions and reasons
+    - System states
+    
+    Used on demand, not always.
+    """
+    
+    def __init__(self):
+        self.all_events: list[ContextEvent] = []
+        self.decisions: list[DecisionObject] = []
+        self.states: list[dict] = []
+    
+    def add_event(self, event: ContextEvent):
+        self.all_events.append(event)
+    
+    def add_decision(self, decision: DecisionObject):
+        self.decisions.append(decision)
+    
+    def save_state(self, state: dict):
+        self.states.append({
+            "timestamp": datetime.now().isoformat(),
+            **state
+        })
+    
+    def get_events_by_type(self, event_type: str) -> list[ContextEvent]:
+        return [e for e in self.all_events if e.event_type == event_type]
+    
+    def get_recent_decisions(self, n: int = 10) -> list[DecisionObject]:
+        return self.decisions[-n:]
+
+
+class MemoryGate:
+    """
+    Memory Gate.
+    
+    Purpose: Limit the amount of information passed to OM.
+    
+    Functions:
+    - Context filtering
+    - Prioritization
+    - Protection from OM overload
+    
+    OM receives only a slice.
+    Learning circuit receives everything.
+    """
+    
+    def __init__(
+        self,
+        max_context_events: int = 10,
+        min_importance: float = 0.3
+    ):
+        self.max_context_events = max_context_events
+        self.min_importance = min_importance
+    
+    def filter_context(
+        self,
+        events: list[ContextEvent],
+        current_importance: float = 0.5
+    ) -> list[ContextEvent]:
+        """
+        Filter and prioritize context events for OM.
+        
+        Criteria:
+        - Importance threshold
+        - Recency
+        - Relevance to current input
+        """
+        # Filter by importance
+        filtered = [e for e in events if e.importance >= self.min_importance]
+        
+        # Sort by importance * recency weight
+        now = datetime.now()
+        
+        def score(event: ContextEvent) -> float:
+            # Recency weight: newer events get higher weight
+            age_seconds = (now - event.timestamp).total_seconds()
+            recency = max(0.1, 1 - age_seconds / 3600)  # Decay over 1 hour
+            return event.importance * recency
+        
+        sorted_events = sorted(filtered, key=score, reverse=True)
+        
+        # Limit to max
+        return sorted_events[:self.max_context_events]
+
+
+class ContextManager:
+    """
+    Context Manager (KM).
+    
+    Purpose: Collect and reflect the current state of the entire system.
+    
+    Receives data from:
+    - User
+    - Security Gate
+    - OM (decisions made)
+    - Experts / Critic
+    - External sources (future: audio, video)
+    
+    KM does NOT make decisions.
+    """
+    
+    def __init__(self):
+        self.short_store = ShortContextStore()
+        self.full_store = FullContextStore()
+        self.memory_gate = MemoryGate()
+    
+    def record_user_input(self, user_input: str, importance: float = 0.7):
+        """Record user input as a context event."""
+        event = ContextEvent(
+            timestamp=datetime.now(),
+            event_type="user_input",
+            content=user_input,
+            importance=importance
+        )
+        self.short_store.add_event(event)
+        self.full_store.add_event(event)
+    
+    def record_system_response(self, response: str, importance: float = 0.5):
+        """Record system response."""
+        event = ContextEvent(
+            timestamp=datetime.now(),
+            event_type="system_response",
+            content=response,
+            importance=importance
+        )
+        self.short_store.add_event(event)
+        self.full_store.add_event(event)
+    
+    def record_expert_output(self, expert_type: str, output: str, importance: float = 0.4):
+        """Record expert output."""
+        event = ContextEvent(
+            timestamp=datetime.now(),
+            event_type=f"expert_{expert_type}",
+            content=output,
+            importance=importance
+        )
+        self.full_store.add_event(event)  # Only to full store
+    
+    def record_decision(self, decision: DecisionObject):
+        """Record OM decision."""
+        self.full_store.add_decision(decision)
+    
+    def get_context_slice(
+        self,
+        user_input: str,
+        user_identity: UserIdentity
+    ) -> ContextSlice:
+        """
+        Get a context slice for OM.
+        
+        This is filtered by Memory Gate.
+        """
+        # Get recent events from short store
+        recent = self.short_store.get_recent_events(20)
+        
+        # Filter through Memory Gate
+        filtered = self.memory_gate.filter_context(recent)
+        
+        return ContextSlice(
+            user_input=user_input,
+            user_identity=user_identity,
+            recent_events=filtered,
+            active_goal=self.short_store.active_goal,
+            emotional_state=self.short_store.emotional_state,
+            system_mode=self.short_store.system_mode
+        )
+    
+    def get_full_context(self) -> dict:
+        """
+        Get full context for Learning Decoder.
+        
+        This bypasses Memory Gate.
+        """
+        return {
+            "all_events": [e.to_dict() for e in self.full_store.all_events],
+            "decisions": [d.to_dict() for d in self.full_store.decisions],
+            "states": self.full_store.states,
+            "current": {
+                "goal": self.short_store.active_goal,
+                "emotional_state": self.short_store.emotional_state,
+                "mode": self.short_store.system_mode
+            }
+        }
