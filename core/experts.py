@@ -14,22 +14,25 @@ MAX_REACT_STEPS = 5
 
 
 EXPERT_PROMPTS = {
-    "neutral": """You are a calculator operator. You CANNOT do math yourself.
+    "neutral": """[SYSTEM MESSAGE]
+You are OMEGA-DISPATCHER, a non-coding tool interface.
+Your ONLY capability is to break down requests into tool calls.
 
-ABSOLUTE RULES:
-1. You MUST use the tool for ANY arithmetic. NO mental math. NO formulas in text.
-2. If you write "83.4 - 16.8" without a tool call, you have FAILED.
-3. Output ONLY ONE tool call per response. Wait for [OBSERVATION].
-4. "расход" (consumption) = NEGATIVE rate.
+⛔ VISUALIZATION OF ERROR:
+User: "Calculate 2+2"
+You (WRONG): "print(2+2)"  <-- DO NOT DO THIS. YOU HAVE NO PYTHON INTERPRETER.
+You (WRONG): "def add(a,b): return a+b" <-- NO CODING ASSISTANT BEHAVIOR.
+You (CORRECT): "NEED_TOOL: calculate linear change..."
 
-ONLY VALID OUTPUT FORMAT:
-```json
-{"tool": "calculate_linear_change", "arguments": {"start": 83.4, "rate": -1.4, "time": 12}}
-```
+✅ CRITICAL PROTOCOL:
+1. If you need data (prices, news) -> Write "NEED_TOOL: search <query>"
+2. If you need math -> Write "NEED_TOOL: calculate..."
+3. DO NOT write Python/JS/Pseudo-code.
+4. DO NOT output JSON directly (FunctionGemma will do that).
 
-After final [OBSERVATION], write: "RESULT: X%"
-
-DO NOT explain. DO NOT create JSON structures with formulas. ONLY tool calls.""",
+GOAL: Solve the user's request using ONLY natural language thoughts and `NEED_TOOL:` commands.
+After final [OBSERVATION], write: "RESULT: X"
+""",
 
     "creative": """You are a creative problem-solver. Be CONCISE.
 Propose innovative solutions, but respect constraints.
@@ -129,6 +132,22 @@ class ExpertsModule:
             full_response_parts.append(response_text)
             history.append(response_text)
             
+            # --- GUARDRAIL: Detect Python Code Hallucination ---
+            # If the model tries to write code blocks or functions, stop it.
+            if "```python" in response_text or ("def " in response_text and "return " in response_text):
+                print("[Experts] GUARDRAIL TRIGGERED: Python code detected.")
+                warning_msg = """
+[SYSTEM ERROR]: You wrote Python code.
+I do NOT have a Python interpreter. I cannot run this.
+STOP writing code.
+Use the tool: "NEED_TOOL: <description>"
+Try again properly.
+"""
+                full_response_parts.append(warning_msg)
+                history.append(warning_msg)
+                continue
+            # ----------------------------------------------------
+
             # 1. Parse for NEED_TOOL intent (for FunctionGemma)
             if self.tool_caller and "NEED_TOOL:" in response_text:
                 import re
