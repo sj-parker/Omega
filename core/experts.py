@@ -5,7 +5,7 @@ from typing import Optional
 import sys
 sys.path.insert(0, str(__file__).rsplit('\\', 2)[0])
 from datetime import datetime
-
+import json
 from models.schemas import ExpertResponse, PolicySpace, CriticAnalysis, WorldState
 from core.tools import ToolsRegistry, ToolResult
 from models.llm_interface import LLMInterface
@@ -53,24 +53,17 @@ For plans, generate 2-3 scenarios with probabilities."""
 }
 
 
+
 class ExpertsModule:
     """
-    Experts Module.
-    
-    Purpose: Generate alternative viewpoints.
-    
-    Implementation:
-    - Same LLM
-    - Different temperatures, system prompts, roles
-    
-    Types: neutral, creative, conservative
-    
-    Remember: Experts are luxury, not default.
+    Experts Module with Tool Dispatcher.
+    separates reasoning (Main LLM) from tool execution (FunctionGemma).
     """
     
-    def __init__(self, llm: LLMInterface, policy: PolicySpace):
+    def __init__(self, llm: LLMInterface, policy: PolicySpace, tool_caller: Optional[LLMInterface] = None):
         self.llm = llm
         self.policy = policy
+        self.tool_caller = tool_caller
     
     async def consult_expert(
         self,
@@ -79,9 +72,19 @@ class ExpertsModule:
         world_state: WorldState,
         context: str = ""
     ) -> ExpertResponse:
-        """Consult a single expert using a ReAct loop with state awareness."""
+        """Consult a single expert using a ReAct loop with FunctionGemma dispatch."""
         
+        # Modified prompt for FunctionGemma integration
         system_prompt = EXPERT_PROMPTS.get(expert_type, EXPERT_PROMPTS["neutral"])
+        
+        if self.tool_caller:
+           system_prompt += """
+           
+           TOOL CALLING INSTRUCTION:
+           If you need to calculate something, do NOT output JSON.
+           Instead, write: "NEED_TOOL: <description of calculation>"
+           Example: "NEED_TOOL: calculate linear change for battery from 83.4 with -1.4 rate for 12 mins"
+           """
         
         # Determine temperature
         if expert_type == "creative":
@@ -126,7 +129,36 @@ class ExpertsModule:
             full_response_parts.append(response_text)
             history.append(response_text)
             
-            # Check for Tool Call
+            # 1. Parse for NEED_TOOL intent (for FunctionGemma)
+            if self.tool_caller and "NEED_TOOL:" in response_text:
+                import re
+                match = re.search(r"NEED_TOOL:\s*(.+)", response_text)
+                if match:
+                    task_desc = match.group(1).strip()
+                    print(f"[Experts] Delegating to FunctionGemma: {task_desc}")
+                    
+                    # FunctionGemma generates the PRECISE JSON
+                    tools_def = ToolsRegistry.get_tool_definitions()
+                    tool_json = await self.tool_caller.call_tool(task_desc, tools_def)
+                    
+                    if tool_json:
+                        # Execute the generated JSON
+                        tool_res = ToolsRegistry.execute_structured_call(json.dumps(tool_json))
+                        
+                        # Apply state update
+                        if tool_res.state_update:
+                            local_data.update(tool_res.state_update)
+                        
+                        observation = f"\n[OBSERVATION]: {tool_res.message}"
+                        full_response_parts.append(observation)
+                        
+                        # Track last observation for verified result extraction
+                        last_observation = tool_res.message
+                        
+                        history.append(f"{observation}\n\n[THOUGHT]: Based on the result, I will...")
+                        continue
+
+            # 2. Fallback: Parse legacy JSON (if FunctionGemma not used or Main LLM hallucinates JSON)
             if '"tool":' in response_text:
                 try:
                     start = response_text.find('{')

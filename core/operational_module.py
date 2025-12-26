@@ -50,14 +50,16 @@ class OperationalModule:
     - Send trace to Learning Decoder
     """
     
+    
     def __init__(
         self,
         llm: LLMInterface,
-        policy: Optional[PolicySpace] = None
+        policy: Optional[PolicySpace] = None,
+        tool_caller: Optional[LLMInterface] = None
     ):
         self.llm = llm
         self.policy = policy or PolicySpace()
-        self.experts = ExpertsModule(llm, self.policy)
+        self.experts = ExpertsModule(llm, self.policy, tool_caller)
         self.critic = CriticModule(llm)
         self.validator = SemanticValidator(llm)
     

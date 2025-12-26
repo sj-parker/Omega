@@ -14,7 +14,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent))
 
 from models.schemas import PolicySpace, WorldState
-from models.llm_interface import MockLLM, OllamaLLM, LLMRouter
+from models.llm_interface import MockLLM, OllamaLLM, LLMRouter, FunctionGemmaLLM
 from core.gatekeeper import Gatekeeper, UserHistoryStore
 from core.context_manager import ContextManager
 from core.operational_module import OperationalModule
@@ -45,6 +45,8 @@ class CognitiveSystemWeb:
         self.use_multi_model = use_multi_model if use_multi_model is not None else config.get("models.use_multi_model")
 
         # Initialize LLM(s)
+        self.tool_caller = None
+        
         if self.use_ollama:
             if self.use_multi_model:
                 fast_llm = OllamaLLM(model=self.fast_model)
@@ -52,6 +54,13 @@ class CognitiveSystemWeb:
                 self.llm = LLMRouter(fast_llm=fast_llm, main_llm=main_llm)
             else:
                 self.llm = OllamaLLM(model=self.main_model)
+            
+            # Initialize FunctionGemma for tool calling
+            try:
+                self.tool_caller = FunctionGemmaLLM()
+                print("[System] FunctionGemma tool caller initialized.")
+            except Exception as e:
+                print(f"[System] Failed to init FunctionGemma: {e}")
         else:
             self.llm = MockLLM()
         
@@ -63,7 +72,7 @@ class CognitiveSystemWeb:
         self.history_store = UserHistoryStore()
         self.gatekeeper = Gatekeeper(self.history_store)
         self.context_manager = ContextManager()
-        self.om = OperationalModule(self.llm, self.policy)
+        self.om = OperationalModule(self.llm, self.policy, self.tool_caller)
         self.learning_decoder = LearningDecoder(llm=self.quality_llm)
         self.homeostasis = HomeostasisController(self.policy)
         self.reflection = ReflectionController(

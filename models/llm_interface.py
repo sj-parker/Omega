@@ -278,3 +278,101 @@ class OpenAILLM(LLMInterface):
                     return data["choices"][0]["message"]["content"]
                 else:
                     raise Exception(f"OpenAI error: {resp.status}")
+
+
+class FunctionGemmaLLM(LLMInterface):
+    """
+    FunctionGemma - specialized tool-calling model.
+    Uses native Ollama tools=[] format.
+    """
+    
+    def __init__(self, model: str = "functiongemma", base_url: str = "http://localhost:11434"):
+        self.model = model
+        self.base_url = base_url
+        self._tools = []
+    
+    def set_tools(self, tools: list[dict]):
+        """Set available tools in Ollama format."""
+        self._tools = tools
+    
+    async def generate(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        temperature: float = 0.3,  # Lower temp for precise tool calls
+        max_tokens: int = 512
+    ) -> str:
+        """Generate a tool call (or text response)."""
+        import aiohttp
+        
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens
+            }
+        }
+        
+        # Add tools if defined
+        if self._tools:
+            payload["tools"] = self._tools
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{self.base_url}/api/chat",
+                json=payload
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    msg = data.get("message", {})
+                    
+                    # Check for tool calls
+                    if msg.get("tool_calls"):
+                        tool_call = msg["tool_calls"][0]
+                        func = tool_call.get("function", {})
+                        # Return as JSON string
+                        import json
+                        return json.dumps({
+                            "tool": func.get("name"),
+                            "arguments": func.get("arguments", {})
+                        })
+                    
+                    return msg.get("content", "")
+                else:
+                    error_text = await resp.text()
+                    raise Exception(f"FunctionGemma error {resp.status}: {error_text}")
+    
+    async def call_tool(
+        self,
+        task_description: str,
+        tools: list[dict],
+        context: str = ""
+    ) -> Optional[dict]:
+        """
+        High-level method: given a task, return the appropriate tool call.
+        Returns dict with 'tool' and 'arguments', or None if no tool needed.
+        """
+        self.set_tools(tools)
+        
+        prompt = f"""Task: {task_description}
+
+Available tools: {[t.get('function', {}).get('name') for t in tools]}
+
+{f"Context: {context}" if context else ""}
+
+Choose the appropriate tool and provide arguments. Output ONLY the tool call."""
+
+        response = await self.generate(prompt, temperature=0.1)
+        
+        try:
+            import json
+            return json.loads(response)
+        except:
+            return None

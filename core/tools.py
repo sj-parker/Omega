@@ -76,3 +76,65 @@ class ToolsRegistry:
             return ToolResult(message=f"Schema Validation Error: {e}")
         except Exception as e:
             return ToolResult(message=f"Execution Error: {str(e)}")
+    
+    @staticmethod
+    def get_tool_definitions() -> list[dict]:
+        """
+        Export tool definitions in Ollama format for FunctionGemma.
+        """
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "calculate_linear_change",
+                    "description": "Calculate linear change: result = start + (rate * time). Use for battery drain, resource consumption, etc. Use NEGATIVE rate for consumption/drain.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "start": {
+                                "type": "number",
+                                "description": "Starting value (e.g., initial battery %)"
+                            },
+                            "rate": {
+                                "type": "number", 
+                                "description": "Rate of change per time unit. NEGATIVE for consumption/drain, POSITIVE for charging."
+                            },
+                            "time": {
+                                "type": "number",
+                                "description": "Duration in time units (e.g., minutes)"
+                            },
+                            "variable_name": {
+                                "type": "string",
+                                "description": "Name of state variable to update (default: 'result')"
+                            }
+                        },
+                        "required": ["start", "rate", "time"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "calculate_resource_allocation",
+                    "description": "Calculate remaining resources: remaining = total - requested. Returns status OK or OVERFLOW.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "total": {
+                                "type": "number",
+                                "description": "Total available resources"
+                            },
+                            "requested": {
+                                "type": "number",
+                                "description": "Amount being requested/consumed"
+                            },
+                            "variable_name": {
+                                "type": "string",
+                                "description": "Name of state variable to update (default: 'remaining')"
+                            }
+                        },
+                        "required": ["total", "requested"]
+                    }
+                }
+            }
+        ]
