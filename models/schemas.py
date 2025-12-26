@@ -54,6 +54,7 @@ class DecisionObject:
     policy_snapshot: dict = field(default_factory=dict)
     reasoning: str = ""
     thoughts: str = ""
+    validation_report: dict = field(default_factory=dict)
     
     def to_dict(self) -> dict:
         return {
@@ -64,6 +65,7 @@ class DecisionObject:
             "policy_snapshot": self.policy_snapshot,
             "reasoning": self.reasoning,
             "thoughts": self.thoughts,
+            "validation_report": self.validation_report,
         }
 
 
@@ -192,6 +194,7 @@ class RawTrace:
     final_response: str = ""
     user_reaction: Optional[str] = None  # follow-up, satisfaction, etc.
     thoughts: str = ""
+    validation_report: dict = field(default_factory=dict)
     
     def to_dict(self) -> dict:
         return {
@@ -205,6 +208,7 @@ class RawTrace:
             "final_response": self.final_response,
             "user_reaction": self.user_reaction,
             "thoughts": self.thoughts,
+            "validation_report": self.validation_report,
         }
 
 
@@ -253,7 +257,7 @@ class ExtractedPattern:
 @dataclass
 class ExpertResponse:
     """Ответ одного эксперта."""
-    expert_type: Literal["neutral", "creative", "conservative"]
+    expert_type: Literal["neutral", "creative", "conservative", "adversarial", "forecaster"]
     response: str
     confidence: float
     temperature_used: float

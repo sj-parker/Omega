@@ -154,8 +154,17 @@ async def chat(request: Request):
     if not message:
         return JSONResponse({"error": "Empty message"}, status_code=400)
     
-    result = await system.process(user_id, message)
-    return JSONResponse(result)
+    try:
+        result = await system.process(user_id, message)
+        return JSONResponse(result)
+    except Exception as e:
+        print(f"Error processing stats: {e}")
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            {"response": f"System Error: {str(e)}", "error": True}, 
+            status_code=500
+        )
 
 
 @app.get("/api/stats")

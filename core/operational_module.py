@@ -14,6 +14,7 @@ from models.schemas import (
 )
 from models.llm_interface import LLMInterface
 from core.experts import ExpertsModule, CriticModule
+from core.validator import SemanticValidator
 
 
 # Intent classification prompts
@@ -27,6 +28,7 @@ Categories:
 - analytical: requires reasoning, comparison, or analysis
 - creative: requires generation of content, ideas
 - complex: multi-step tasks, unclear requirements
+- confirmation: simple acknowledgements, agreements, or announcements of immediate actions (e.g. "ok", "uploading now", "wait")
 
 Output format:
 INTENT: [category]
@@ -57,6 +59,7 @@ class OperationalModule:
         self.policy = policy or PolicySpace()
         self.experts = ExpertsModule(llm, self.policy)
         self.critic = CriticModule(llm)
+        self.validator = SemanticValidator(llm)
     
     async def process(
         self,
@@ -108,6 +111,15 @@ class OperationalModule:
         else:  # DEEP
             # Deep path: experts + critic
             response, expert_outputs, critic_output = await self._deep_response(context_slice, thoughts)
+            
+        # Step 3: Semantic/Logic Guardrail
+        validation_report = {}
+        if depth in [DecisionDepth.MEDIUM, DecisionDepth.DEEP]:
+            # Use full reasoning context for validation
+            validation_context = f"{context_slice.long_term_context or ''}\n\nUser Input: {context_slice.user_input}"
+            response, validation_report = await self.validator.validate(response, validation_context)
+            if validation_report.get("status") == "failed":
+                print("[OM] Response corrected by Guardrail.")
         
         # Calculate cost
         elapsed_ms = int((time.time() - start_time) * 1000)
@@ -120,7 +132,8 @@ class OperationalModule:
             cost={"time_ms": elapsed_ms, "experts_used": len(expert_outputs)},
             policy_snapshot=self.policy.to_dict(),
             reasoning=f"Intent: {intent}, Depth: {depth.value}",
-            thoughts=thoughts
+            thoughts=thoughts,
+            validation_report=validation_report
         )
         
         # Create raw trace
@@ -131,7 +144,8 @@ class OperationalModule:
             critic_output=critic_output.to_dict() if critic_output else {},
             decision=decision.to_dict(),
             final_response=response,
-            thoughts=thoughts
+            thoughts=thoughts,
+            validation_report=validation_report
         )
         
         return response, decision, trace
@@ -196,6 +210,9 @@ class OperationalModule:
         # Fast path conditions
         if intent == "smalltalk" and confidence > 0.7:
             return DecisionDepth.FAST
+            
+        if intent == "confirmation":
+            return DecisionDepth.FAST
         
         if confidence > self.policy.fast_path_bias:
             return DecisionDepth.FAST
@@ -254,6 +271,7 @@ User message: {context.user_input}"""
         
         return await self.llm.generate(
             prompt=prompt,
+            system_prompt="You are a helpful assistant.",
             temperature=0.6
         )
     
@@ -338,6 +356,10 @@ ENTITIES: [comma separated list of key entities]"""
         
         thoughts_prompt = f"""Analyze the user query and context. Provide an internal strategy for solving this.
 What are the keys to a good answer? What should experts focus on?
+
+If this is a RESOURCE allocation or LOGIC problem:
+- Explicitly ask experts to create a "JSON STATE BLOCK".
+- Identify constraints (e.g. max ports, budget).
 
 User query: {context.user_input}
 Recent context: {[e.content[:50] for e in context.recent_events[-3:]]}
