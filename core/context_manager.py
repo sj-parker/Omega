@@ -9,7 +9,7 @@ import sys
 sys.path.insert(0, str(__file__).rsplit('\\', 2)[0])
 
 from models.schemas import (
-    UserIdentity, ContextEvent, ContextSlice, DecisionObject
+    UserIdentity, ContextEvent, ContextSlice, DecisionObject, LongTermFact
 )
 
 
@@ -137,6 +137,28 @@ class MemoryGate:
         # Limit to max
         return sorted_events[:self.max_context_events]
 
+    def rank_facts(self, facts: list[LongTermFact], query: str) -> list[LongTermFact]:
+        """Rank long-term facts based on relevance to query."""
+        if not facts:
+            return []
+            
+        # Simple heuristic: word overlap + importance
+        query_words = set(query.lower().split())
+        
+        def fact_score(fact: LongTermFact) -> float:
+            content_words = set(fact.content.lower().split())
+            overlap = len(query_words.intersection(content_words))
+            
+            # Entity bonus
+            for entity in fact.entities:
+                if entity.lower() in query.lower():
+                    overlap += 2
+                    
+            return (overlap * 0.5) + (fact.importance * 0.5)
+            
+        sorted_facts = sorted(facts, key=fact_score, reverse=True)
+        return [f for f in sorted_facts if fact_score(f) > 0.4][:3] # Return top 3 relevant facts
+
 
 class ContextManager:
     """
@@ -154,10 +176,28 @@ class ContextManager:
     KM does NOT make decisions.
     """
     
-    def __init__(self):
+    def __init__(self, storage_path: Optional[str] = None):
         self.short_store = ShortContextStore()
         self.full_store = FullContextStore()
         self.memory_gate = MemoryGate()
+        self.long_term_facts: list[LongTermFact] = []
+        self.storage_path = storage_path
+        
+        # Load facts if storage_path is provided (future)
+        
+    def add_fact(self, content: str, entities: list[str] = None, importance: float = 0.8):
+        """Add a distilled fact to long-term memory."""
+        fact = LongTermFact(
+            content=content,
+            entities=entities or [],
+            importance=importance
+        )
+        self.long_term_facts.append(fact)
+        print(f"[KM] New fact stored: {content[:50]}...")
+        
+    def search_facts(self, query: str) -> list[LongTermFact]:
+        """Search for relevant facts in long-term memory."""
+        return self.memory_gate.rank_facts(self.long_term_facts, query)
     
     def record_user_input(self, user_input: str, importance: float = 0.7):
         """Record user input as a context event."""
@@ -219,6 +259,17 @@ class ContextManager:
             emotional_state=self.short_store.emotional_state,
             system_mode=self.short_store.system_mode
         )
+    
+    def get_context_for_recall(self, user_input: str) -> str:
+        """Get formatted facts relevant to the query for retrieval."""
+        relevant_facts = self.search_facts(user_input)
+        if not relevant_facts:
+            return ""
+            
+        fact_str = "\nRelevant Background Information (Long-term Memory):\n"
+        for i, fact in enumerate(relevant_facts):
+            fact_str += f"- {fact.content}\n"
+        return fact_str
     
     def get_full_context(self) -> dict:
         """

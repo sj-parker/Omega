@@ -84,25 +84,25 @@ class ExpertsModule:
         prompt: str,
         context: str = ""
     ) -> list[ExpertResponse]:
-        """Consult all experts (for deep path)."""
+        """Consult all experts in parallel (for deep path)."""
+        import asyncio
         
-        results = []
+        tasks = []
         for expert_type in ["neutral", "creative", "conservative"]:
-            resp = await self.consult_expert(expert_type, prompt, context)
-            results.append(resp)
-        
-        return results
+            tasks.append(self.consult_expert(expert_type, prompt, context))
+            
+        return await asyncio.gather(*tasks)
 
 
-CRITIC_PROMPT = """You are a critical analyst reviewing responses from multiple experts.
+CRITIC_PROMPT = """You are a master synthesis analyst. Your goal is to create the single BEST response by combining insights from multiple experts.
 
-Your job is to:
-1. Identify logical inconsistencies
-2. Detect potential hallucinations or unfounded claims
-3. Assess the level of disagreement between experts
-4. Recommend the best response or a synthesis
+Your process:
+1. Identify logical inconsistencies or contradictions between experts.
+2. Detect potential hallucinations or unfounded claims.
+3. Assess the level of disagreement between experts.
+4. SYNTHESIZE: Instead of just picking one expert, combine their strengths (e.g. the accuracy of Neutral, the innovation of Creative, and the safety of Conservative) into a final, authoritative, and coherent response.
 
-Be constructive but thorough. Output your analysis in a structured way."""
+Provide your analysis and the FINAL SYNTHESIZED RESPONSE."""
 
 
 class CriticModule:
@@ -141,7 +141,7 @@ Expert Responses:
 Analyze these responses for:
 1. Inconsistencies between experts
 2. Potential hallucinations or unfounded claims
-3. Which response (or combination) is most reliable
+3. SYNTHESIZED RESPONSE: Create a final authoritative answer by combining the best points from all experts.
 4. Overall disagreement level (0-1 scale)"""
         
         analysis = await self.llm.generate(
@@ -153,12 +153,21 @@ Analyze these responses for:
         # Calculate disagreement score (simple heuristic)
         disagreement = self._calculate_disagreement(expert_responses)
         
+        # Extract synthesized response
+        recommended = self._extract_synthesized_response(analysis) or (expert_responses[0].response if expert_responses else None)
+
         return CriticAnalysis(
             inconsistencies=self._extract_inconsistencies(analysis),
-            hallucination_risk=0.2,  # Could be refined with more analysis
-            recommended_response=expert_responses[0].response if expert_responses else None,
+            hallucination_risk=0.2,
+            recommended_response=recommended,
             disagreement_score=disagreement
         )
+
+    def _extract_synthesized_response(self, analysis: str) -> Optional[str]:
+        """Extract the final synthesized response from critic output."""
+        if "SYNTHESIZED RESPONSE:" in analysis:
+            return analysis.split("SYNTHESIZED RESPONSE:", 1)[1].split("4.", 1)[0].strip()
+        return None
     
     def _calculate_disagreement(self, responses: list[ExpertResponse]) -> float:
         """Calculate disagreement between expert responses."""

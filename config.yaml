@@ -1,0 +1,12 @@
+# Models configuration
+models:
+  main: "gemma3n:e2b"
+  fast: "phi3:mini"
+  use_ollama: true
+  use_multi_model: true
+
+# System settings
+system:
+  reflection_interval: 60.0
+  user_id_default: "user1"
+  port: 8000

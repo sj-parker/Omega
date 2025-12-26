@@ -20,8 +20,10 @@ from core.experts import ExpertsModule, CriticModule
 INTENT_CLASSIFIER_PROMPT = """Classify the user intent and estimate your confidence.
 
 Categories:
-- smalltalk: casual conversation, greetings, simple questions
-- factual: requests for information or facts
+- memorize: New facts, specific data, or instructions to save for future use (e.g. project passwords, user preferences)
+- recall: Questions about past facts, specific data mentioned earlier, or conversation history
+- smalltalk: casual conversation, greetings, simple social interaction
+- factual: requests for general information or facts NOT in previous conversation
 - analytical: requires reasoning, comparison, or analysis
 - creative: requires generation of content, ideas
 - complex: multi-step tasks, unclear requirements
@@ -58,7 +60,8 @@ class OperationalModule:
     
     async def process(
         self,
-        context_slice: ContextSlice
+        context_slice: ContextSlice,
+        context_manager: Optional['ContextManager'] = None
     ) -> tuple[str, DecisionObject, RawTrace]:
         """
         Process user input and generate response.
@@ -74,11 +77,27 @@ class OperationalModule:
         intent, confidence = await self._classify_intent(context_slice.user_input)
         depth = self._decide_depth(intent, confidence, context_slice)
         
+        # Step 1.5: Handle recall intent (RAG)
+        if intent == "recall" and context_manager:
+            relevant_facts = context_manager.get_context_for_recall(context_slice.user_input)
+            context_slice.long_term_context = relevant_facts
+            print(f"[OM] Recall triggered. Long-term context added.")
+            
+        # Step 1.6: Generate internal thoughts for complex tasks
+        thoughts = ""
+        if depth == DecisionDepth.DEEP:
+            thoughts = await self._generate_thoughts(context_slice)
+            print(f"[OM] Inner Monologue: {thoughts[:80]}...")
+            
         # Step 2: Generate response based on depth
         expert_outputs = []
         critic_output = None
         
-        if depth == DecisionDepth.FAST:
+        if intent == "memorize" and context_manager:
+            # Special case for memorization
+            response = await self._memorize_and_respond(context_slice, context_manager)
+            depth = DecisionDepth.FAST # Memorization is usually fast
+        elif depth == DecisionDepth.FAST:
             # Fast path: single LLM call
             response = await self._fast_response(context_slice)
             
@@ -88,7 +107,7 @@ class OperationalModule:
             
         else:  # DEEP
             # Deep path: experts + critic
-            response, expert_outputs, critic_output = await self._deep_response(context_slice)
+            response, expert_outputs, critic_output = await self._deep_response(context_slice, thoughts)
         
         # Calculate cost
         elapsed_ms = int((time.time() - start_time) * 1000)
@@ -100,7 +119,8 @@ class OperationalModule:
             depth_used=depth,
             cost={"time_ms": elapsed_ms, "experts_used": len(expert_outputs)},
             policy_snapshot=self.policy.to_dict(),
-            reasoning=f"Intent: {intent}, Depth: {depth.value}"
+            reasoning=f"Intent: {intent}, Depth: {depth.value}",
+            thoughts=thoughts
         )
         
         # Create raw trace
@@ -110,7 +130,8 @@ class OperationalModule:
             expert_outputs=[e.to_dict() for e in expert_outputs],
             critic_output=critic_output.to_dict() if critic_output else {},
             decision=decision.to_dict(),
-            final_response=response
+            final_response=response,
+            thoughts=thoughts
         )
         
         return response, decision, trace
@@ -118,11 +139,19 @@ class OperationalModule:
     async def _classify_intent(self, user_input: str) -> tuple[str, float]:
         """Classify user intent and estimate confidence."""
         
-        response = await self.llm.generate(
-            prompt=f"User message: {user_input}",
-            system_prompt=INTENT_CLASSIFIER_PROMPT,
-            temperature=0.2
-        )
+        # Use generate_fast if available to speed up intent classification
+        if hasattr(self.llm, 'generate_fast'):
+            response = await self.llm.generate_fast(
+                prompt=f"User message: {user_input}",
+                system_prompt=INTENT_CLASSIFIER_PROMPT,
+                temperature=0.2
+            )
+        else:
+            response = await self.llm.generate(
+                prompt=f"User message: {user_input}",
+                system_prompt=INTENT_CLASSIFIER_PROMPT,
+                temperature=0.2
+            )
         
         # Parse response
         intent = "factual"  # default
@@ -211,6 +240,10 @@ class OperationalModule:
         for event in context.recent_events[-5:]:
             context_str += f"[{event.event_type}] {event.content}\n"
         
+        # Add long-term context if available
+        if context.long_term_context:
+            context_str = context.long_term_context + "\n" + context_str
+
         prompt = f"""Context:
 {context_str}
 
@@ -226,16 +259,25 @@ User message: {context.user_input}"""
     
     async def _deep_response(
         self,
-        context: ContextSlice
+        context: ContextSlice,
+        thoughts: str = ""
     ) -> tuple[str, list[ExpertResponse], CriticAnalysis]:
         """Deep path: experts + critic (uses MainLLM for quality)."""
         
         # Build context
-        context_str = "\n".join([
+        recent_str = "\n".join([
             f"[{e.event_type}] {e.content}"
             for e in context.recent_events[-5:]
         ])
         
+        context_str = recent_str
+        if context.long_term_context:
+            context_str = context.long_term_context + "\n" + recent_str
+        
+        # Inject thoughts into expert prompt
+        if thoughts:
+            context_str = f"INTERNAL THOUGHTS FOR FOCUS: {thoughts}\n\n" + context_str
+
         # Ensure we use main LLM for experts (quality-critical)
         if hasattr(self.llm, 'set_mode'):
             self.llm.set_mode("main")
@@ -261,6 +303,53 @@ User message: {context.user_input}"""
         
         return response, expert_responses, critic_analysis
     
+    async def _memorize_and_respond(self, context: ContextSlice, km: 'ContextManager') -> str:
+        """Extract fact from input, store it, and confirm."""
+        
+        extraction_prompt = f"""Extract the core fact or piece of information to be remembered from this user message.
+User message: {context.user_input}
+
+Output format:
+FACT: [concise fact]
+ENTITIES: [comma separated list of key entities]"""
+
+        response = await self.llm.generate(
+            prompt=extraction_prompt,
+            system_prompt="You are a memory extraction expert. Be precise.",
+            temperature=0.2
+        )
+        
+        fact = ""
+        entities = []
+        for line in response.split('\n'):
+            if line.startswith("FACT:"):
+                fact = line.split(":", 1)[1].strip()
+            elif line.startswith("ENTITIES:"):
+                entities = [e.strip() for e in line.split(":", 1)[1].split(",")]
+        
+        if fact:
+            km.add_fact(fact, entities)
+            return f"Understood. I've saved that: {fact}"
+        else:
+            return "I understood you want me to remember something, but I couldn't identify a specific fact. Could you please clarify?"
+
+    async def _generate_thoughts(self, context: ContextSlice) -> str:
+        """Generate internal strategy/thoughts for the current task."""
+        
+        thoughts_prompt = f"""Analyze the user query and context. Provide an internal strategy for solving this.
+What are the keys to a good answer? What should experts focus on?
+
+User query: {context.user_input}
+Recent context: {[e.content[:50] for e in context.recent_events[-3:]]}
+
+Output: Your internal thoughts (1-2 sentences)."""
+
+        return await self.llm.generate(
+            prompt=thoughts_prompt,
+            system_prompt="You are the system's core reasoning engine. Think before you act.",
+            temperature=0.4
+        )
+
     def update_policy(self, updates: dict):
         """Apply policy updates from Homeostasis."""
         self.policy.apply_update(updates)

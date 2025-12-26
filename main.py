@@ -16,6 +16,7 @@ from core.operational_module import OperationalModule
 from learning.learning_decoder import LearningDecoder
 from learning.homeostasis import HomeostasisController
 from learning.reflection import ReflectionController
+from core.config import config
 
 
 class CognitiveSystem:
@@ -39,23 +40,29 @@ class CognitiveSystem:
     
     def __init__(
         self,
-        use_ollama: bool = False,
-        main_model: str = "qwen2.5:7b",
-        fast_model: str = "phi3:mini",
-        use_multi_model: bool = True
+        use_ollama: bool = None,
+        main_model: str = None,
+        fast_model: str = None,
+        use_multi_model: bool = None
     ):
+        # Load from config or use provided values
+        self.use_ollama = use_ollama if use_ollama is not None else config.get("models.use_ollama")
+        self.main_model = main_model if main_model is not None else config.get("models.main")
+        self.fast_model = fast_model if fast_model is not None else config.get("models.fast")
+        self.use_multi_model = use_multi_model if use_multi_model is not None else config.get("models.use_multi_model")
+
         # Initialize LLM(s)
-        if use_ollama:
-            if use_multi_model:
+        if self.use_ollama:
+            if self.use_multi_model:
                 # Multi-model setup: fast + main
-                fast_llm = OllamaLLM(model=fast_model)
-                main_llm = OllamaLLM(model=main_model)
+                fast_llm = OllamaLLM(model=self.fast_model)
+                main_llm = OllamaLLM(model=self.main_model)
                 self.llm = LLMRouter(fast_llm=fast_llm, main_llm=main_llm)
-                print(f"[LLM] Multi-model: Fast={fast_model}, Main={main_model}")
+                print(f"[LLM] Multi-model: Fast={self.fast_model}, Main={self.main_model}")
             else:
                 # Single model
-                self.llm = OllamaLLM(model=main_model)
-                print(f"[LLM] Single model: {main_model}")
+                self.llm = OllamaLLM(model=self.main_model)
+                print(f"[LLM] Single model: {self.main_model}")
         else:
             self.llm = MockLLM()
         
@@ -103,7 +110,7 @@ class CognitiveSystem:
         context_slice = self.context_manager.get_context_slice(message, identity)
         
         # Step 4: Process through Operational Module
-        response, decision, trace = await self.om.process(context_slice)
+        response, decision, trace = await self.om.process(context_slice, self.context_manager)
         
         # Step 5: Record response
         self.context_manager.record_system_response(response)
@@ -115,6 +122,10 @@ class CognitiveSystem:
         # Step 7: Create summary for reflection
         await self.learning_decoder.create_summary(trace)
         
+        # Step 8: Memory Compaction Trigger (Omega) - Background
+        if len(self.context_manager.short_store.events) >= 15:
+            asyncio.create_task(self._trigger_memory_compaction())
+            
         # Print diagnostics
         print(f"[OM] Depth: {decision.depth_used.value}, Confidence: {decision.confidence:.2f}, Cost: {decision.cost['time_ms']}ms")
         
@@ -142,6 +153,43 @@ class CognitiveSystem:
             "patterns_found": len(self.learning_decoder.get_patterns()),
             "episodes_recorded": len(self.learning_decoder.summaries)
         }
+    
+    async def _trigger_memory_compaction(self):
+        """Compact short-term memory into long-term facts."""
+        print("[Memory] Compacting short-term memory...")
+        recent_events = self.context_manager.short_store.get_recent_events(10)
+        
+        # Build context for summarization
+        context_text = "\n".join([f"[{e.event_type}] {e.content}" for e in recent_events])
+        
+        compaction_prompt = f"""Review the following recent interactions and extract 1-2 important PERMANENT facts or context updates that should be kept in long-term memory.
+Ignore smalltalk. Focus on: names, project details, passwords, user preferences, or major task shifts.
+
+Recent Interactions:
+{context_text}
+
+Output format:
+FACTS:
+- [fact 1]
+- [fact 2] (optional)"""
+
+        try:
+            response = await self.quality_llm.generate(
+                prompt=compaction_prompt,
+                system_prompt="You are a context compaction expert.",
+                temperature=0.3
+            )
+            
+            for line in response.split('\n'):
+                if line.strip().startswith("-"):
+                    fact = line.strip()[1:].strip()
+                    if fact:
+                        self.context_manager.add_fact(fact, importance=0.6)
+            
+            # Optionally clear some old events from short store? 
+            # ShortContextStore uses deque(maxlen=20) so it's already bounded.
+        except Exception as e:
+            print(f"[Memory] Compaction error: {e}")
 
 
 async def interactive_cli():
@@ -152,25 +200,33 @@ async def interactive_cli():
     print()
     
     # Ask for LLM choice
-    use_ollama = input("Use Ollama? (y/n, default: n): ").strip().lower() == 'y'
+    use_ollama_default = config.get("models.use_ollama")
+    use_ollama_str = input(f"Use Ollama? (y/n, default: {'y' if use_ollama_default else 'n'}): ").strip().lower()
+    
+    if use_ollama_str == "":
+        use_ollama = use_ollama_default
+    else:
+        use_ollama = use_ollama_str == 'y'
     
     if use_ollama:
         use_multi_input = input("Use multi-model? (y/n, default: y): ").strip().lower()
         use_multi = use_multi_input != 'n'
         
         # Get main model with validation
-        main_input = input("Main model (default: qwen2.5:7b): ").strip()
+        main_default = config.get("models.main")
+        main_input = input(f"Main model (default: {main_default}): ").strip()
         # Reject y/n as model names
         if main_input.lower() in ('y', 'n', 'yes', 'no', ''):
-            main_model = "qwen2.5:7b"
+            main_model = main_default
         else:
             main_model = main_input
         print(f"  → Using main model: {main_model}")
         
         if use_multi:
-            fast_input = input("Fast model (default: phi3:mini): ").strip()
+            fast_default = config.get("models.fast")
+            fast_input = input(f"Fast model (default: {fast_default}): ").strip()
             if fast_input.lower() in ('y', 'n', 'yes', 'no', ''):
-                fast_model = "phi3:mini"
+                fast_model = fast_default
             else:
                 fast_model = fast_input
             print(f"  → Using fast model: {fast_model}")

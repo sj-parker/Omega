@@ -21,6 +21,7 @@ from core.operational_module import OperationalModule
 from learning.learning_decoder import LearningDecoder
 from learning.homeostasis import HomeostasisController
 from learning.reflection import ReflectionController
+from core.config import config
 
 
 # Global system instance
@@ -32,19 +33,25 @@ class CognitiveSystemWeb:
     
     def __init__(
         self,
-        use_ollama: bool = True,
-        main_model: str = "qwen2.5:7b",
-        fast_model: str = "phi3:mini",
-        use_multi_model: bool = True
+        use_ollama: bool = None,
+        main_model: str = None,
+        fast_model: str = None,
+        use_multi_model: bool = None
     ):
+        # Load from config or use provided values
+        self.use_ollama = use_ollama if use_ollama is not None else config.get("models.use_ollama")
+        self.main_model = main_model if main_model is not None else config.get("models.main")
+        self.fast_model = fast_model if fast_model is not None else config.get("models.fast")
+        self.use_multi_model = use_multi_model if use_multi_model is not None else config.get("models.use_multi_model")
+
         # Initialize LLM(s)
-        if use_ollama:
-            if use_multi_model:
-                fast_llm = OllamaLLM(model=fast_model)
-                main_llm = OllamaLLM(model=main_model)
+        if self.use_ollama:
+            if self.use_multi_model:
+                fast_llm = OllamaLLM(model=self.fast_model)
+                main_llm = OllamaLLM(model=self.main_model)
                 self.llm = LLMRouter(fast_llm=fast_llm, main_llm=main_llm)
             else:
-                self.llm = OllamaLLM(model=main_model)
+                self.llm = OllamaLLM(model=self.main_model)
         else:
             self.llm = MockLLM()
         
@@ -68,7 +75,8 @@ class CognitiveSystemWeb:
     
     async def start(self):
         """Start background tasks."""
-        await self.reflection.start_background(interval_seconds=60.0)
+        interval = config.get("system.reflection_interval", 60.0)
+        await self.reflection.start_background(interval_seconds=interval)
     
     async def stop(self):
         """Stop background tasks."""
@@ -121,12 +129,7 @@ class CognitiveSystemWeb:
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
     global system
-    system = CognitiveSystemWeb(
-        use_ollama=True,
-        main_model="qwen2.5:7b",
-        fast_model="phi3:mini",
-        use_multi_model=True
-    )
+    system = CognitiveSystemWeb()
     await system.start()
     print("[Web] Cognitive System started")
     yield
@@ -562,6 +565,7 @@ async def index():
 if __name__ == "__main__":
     print("=" * 50)
     print("  Cognitive LLM System - Web Interface")
-    print("  Open: http://localhost:8000")
+    port = config.get("system.port", 8000)
+    print(f"  Open: http://localhost:{port}")
     print("=" * 50)
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=port)

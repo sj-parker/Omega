@@ -53,7 +53,8 @@ class DecisionObject:
     cost: dict = field(default_factory=lambda: {"time_ms": 0, "experts_used": 0})
     policy_snapshot: dict = field(default_factory=dict)
     reasoning: str = ""
-
+    thoughts: str = ""
+    
     def to_dict(self) -> dict:
         return {
             "action": self.action,
@@ -62,6 +63,7 @@ class DecisionObject:
             "cost": self.cost,
             "policy_snapshot": self.policy_snapshot,
             "reasoning": self.reasoning,
+            "thoughts": self.thoughts,
         }
 
 
@@ -115,6 +117,8 @@ class ContextEvent:
     event_type: str  # user_input, system_response, expert_output, etc.
     content: Any
     importance: float = 0.5
+    metadata: dict = field(default_factory=dict)
+    tags: list[str] = field(default_factory=list)
     
     def to_dict(self) -> dict:
         return {
@@ -122,6 +126,8 @@ class ContextEvent:
             "event_type": self.event_type,
             "content": self.content,
             "importance": self.importance,
+            "metadata": self.metadata,
+            "tags": self.tags,
         }
 
 
@@ -134,6 +140,7 @@ class ContextSlice:
     active_goal: Optional[str] = None
     emotional_state: str = "neutral"
     system_mode: str = "normal"
+    long_term_context: str = ""
     
     def to_dict(self) -> dict:
         return {
@@ -143,6 +150,28 @@ class ContextSlice:
             "active_goal": self.active_goal,
             "emotional_state": self.emotional_state,
             "system_mode": self.system_mode,
+            "long_term_context": self.long_term_context,
+        }
+
+
+@dataclass
+class LongTermFact:
+    """Извлеченный факт для долгосрочной памяти (Omega)."""
+    fact_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    timestamp: datetime = field(default_factory=datetime.now)
+    content: str = ""
+    entities: list[str] = field(default_factory=list)
+    importance: float = 0.8
+    source_episode: Optional[str] = None
+    
+    def to_dict(self) -> dict:
+        return {
+            "fact_id": self.fact_id,
+            "timestamp": self.timestamp.isoformat(),
+            "content": self.content,
+            "entities": self.entities,
+            "importance": self.importance,
+            "source_episode": self.source_episode,
         }
 
 
@@ -162,6 +191,7 @@ class RawTrace:
     decision: dict = field(default_factory=dict)
     final_response: str = ""
     user_reaction: Optional[str] = None  # follow-up, satisfaction, etc.
+    thoughts: str = ""
     
     def to_dict(self) -> dict:
         return {
@@ -174,6 +204,7 @@ class RawTrace:
             "decision": self.decision,
             "final_response": self.final_response,
             "user_reaction": self.user_reaction,
+            "thoughts": self.thoughts,
         }
 
 
