@@ -13,7 +13,7 @@ import uvicorn
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
 
-from models.schemas import PolicySpace
+from models.schemas import PolicySpace, WorldState
 from models.llm_interface import MockLLM, OllamaLLM, LLMRouter
 from core.gatekeeper import Gatekeeper, UserHistoryStore
 from core.context_manager import ContextManager
@@ -72,6 +72,7 @@ class CognitiveSystemWeb:
             self.quality_llm
         )
         self._reflection_task = None
+        self.world_states: dict[str, WorldState] = {}  # user_id -> WorldState
     
     async def start(self):
         """Start background tasks."""
@@ -86,9 +87,17 @@ class CognitiveSystemWeb:
         """Process a message and return full response data."""
         identity = self.gatekeeper.identify(user_id, message)
         self.context_manager.record_user_input(message)
-        context_slice = self.context_manager.get_context_slice(message, identity)
+        
+        # Get or create world state for user
+        if user_id not in self.world_states:
+            self.world_states[user_id] = WorldState()
+        
+        context_slice = self.context_manager.get_context_slice(message, identity, self.world_states[user_id])
         
         response, decision, trace = await self.om.process(context_slice)
+        
+        # Persist updated world state
+        self.world_states[user_id] = context_slice.world_state
         
         self.context_manager.record_system_response(response)
         self.context_manager.record_decision(decision)

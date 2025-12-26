@@ -112,6 +112,13 @@ class OperationalModule:
             # Deep path: experts + critic
             response, expert_outputs, critic_output = await self._deep_response(context_slice, thoughts)
             
+        # Step 2.5: Apply State Updates from Experts
+        if expert_outputs:
+             for exp in expert_outputs:
+                 if exp.expert_type == "neutral" and exp.world_state:
+                     context_slice.world_state.update(exp.world_state)
+                     break
+            
         # Step 3: Semantic/Logic Guardrail
         validation_report = {}
         if depth in [DecisionDepth.MEDIUM, DecisionDepth.DEEP]:
@@ -303,6 +310,7 @@ User message: {context.user_input}"""
         # Consult all experts
         expert_responses = await self.experts.consult_all(
             prompt=context.user_input,
+            world_state=context.world_state,
             context=context_str
         )
         

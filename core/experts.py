@@ -6,66 +6,50 @@ import sys
 sys.path.insert(0, str(__file__).rsplit('\\', 2)[0])
 from datetime import datetime
 
-from models.schemas import ExpertResponse, PolicySpace, CriticAnalysis
-from core.tools import ToolsRegistry
+from models.schemas import ExpertResponse, PolicySpace, CriticAnalysis, WorldState
+from core.tools import ToolsRegistry, ToolResult
 from models.llm_interface import LLMInterface
+
+MAX_REACT_STEPS = 5
 
 
 EXPERT_PROMPTS = {
-    "neutral": """You are a neutral, balanced analyst. 
-Provide a clear, factual response without emotional bias.
-If you need to calculate NUMBERS, do NOT do mental math.
-Use the TOOL_CALL format:
-`TOOL_CALL: calculate_linear_change(start=50, rate=-1, time=30)`
-or
-`TOOL_CALL: calculate_resource_allocation(total=100, requested=30)`
-The system will check the math for you.
-If the query involves RESOURCES or LOGIC puzzles, you MUST output a JSON STATE BLOCK first:
+    "neutral": """You are a calculator operator. You CANNOT do math yourself.
+
+ABSOLUTE RULES:
+1. You MUST use the tool for ANY arithmetic. NO mental math. NO formulas in text.
+2. If you write "83.4 - 16.8" without a tool call, you have FAILED.
+3. Output ONLY ONE tool call per response. Wait for [OBSERVATION].
+4. "расход" (consumption) = NEGATIVE rate.
+
+ONLY VALID OUTPUT FORMAT:
 ```json
-{
-  "variables": {"var_name": value},
-  "constraints": ["limit > used"],
-  "result": "status",
-  "explanation": "Brief math check"
-}
-```""",
+{"tool": "calculate_linear_change", "arguments": {"start": 83.4, "rate": -1.4, "time": 12}}
+```
 
-    "creative": """You are a creative, innovative thinker.
-Explore unconventional angles and novel solutions.
-Don't be afraid of bold ideas, but maintain logical coherence.
-Even in creativity, respect HARD CONSTRAINTS (constants, available resources).""",
+After final [OBSERVATION], write: "RESULT: X%"
 
-    "conservative": """You are a careful, risk-aware advisor.
-Prioritize safety, stability, and proven approaches.
-Highlight potential risks and edge cases.""",
+DO NOT explain. DO NOT create JSON structures with formulas. ONLY tool calls.""",
 
-    "adversarial": """You are the Devil's Advocate (The Adversarial Agent).
-Your goal is to find FLAWS, CONTRADICTIONS, and FALSE ASSUMPTIONS in the query or potential answers.
-Challenge the consensus. If others say 'yes', you ask 'why?'.
-If the user's premise contradicts established technical facts (like Big O notation or source docs), ATTACK the premise.
-Check the JSON STATE if provided. If the math in JSON doesn't match the Text, expose the lie.""",
+    "creative": """You are a creative problem-solver. Be CONCISE.
+Propose innovative solutions, but respect constraints.
+Use tools for calculations.""",
 
-    "forecaster": """You are a Strategic Forecaster.
-Your job is NOT to give one answer, but to SIMULATE THE FUTURE step-by-step.
+    "conservative": """You are a risk analyst. Be CONCISE.
+Identify risks and edge cases.
+Use tools for calculations.""",
+
+    "adversarial": """You are a Devil's Advocate. Be CONCISE.
+Find flaws and contradictions.
+If math doesn't match text, expose it.
+Use tools to verify claims.""",
+
+    "forecaster": """You are a Strategic Forecaster. Be CONCISE.
 USE TOOLS for calculations. Do not guess.
-`TOOL_CALL: calculate_linear_change(start=X, rate=Y, time=T)`
-
-For any plan or resource allocation, generate 3 SCENARIOS.
-If time/rates are involved, you MUST output a TIMELINE LOG:
-[Time] State | Action | Delta
-[12:00] Bat: 30% | Start | 0
-[12:20] Bat: 50% | Charge | TOOL_CALL: calculate_linear_change(30, 1, 20)
-
-Evaluate each scenario by:
-- Probability of success
-- Resource usage
-- Potential "Black Swan" risks
-
-Output format:
-SCENARIO 1: ...
-SCENARIO 2: ...
-SCENARIO 3: ...
-RECOMMENDATION: ..."""
+```json
+{"tool": "calculate_linear_change", "arguments": {"start": X, "rate": Y, "time": T}}
+```
+For plans, generate 2-3 scenarios with probabilities."""
 }
 
 
@@ -92,59 +76,115 @@ class ExpertsModule:
         self,
         expert_type: str,
         prompt: str,
+        world_state: WorldState,
         context: str = ""
     ) -> ExpertResponse:
-        """Consult a single expert."""
+        """Consult a single expert using a ReAct loop with state awareness."""
         
         system_prompt = EXPERT_PROMPTS.get(expert_type, EXPERT_PROMPTS["neutral"])
         
-        # Determine temperature based on expert type and policy
+        # Determine temperature
         if expert_type == "creative":
             temp = self.policy.creative_range[1]
         elif expert_type == "forecaster":
-            temp = 0.6  # Needs imagination for scenarios
+            temp = 0.6
         elif expert_type == "adversarial":
-            temp = 0.4  # Low temp for sharp analysis
+            temp = 0.4
         elif expert_type == "conservative":
             temp = 0.3
         else:
             temp = 0.5
         
-        full_prompt = prompt
+        history = []
+        if world_state.data:
+            state_str = "\n".join([f"- {k}: {v}" for k, v in world_state.data.items()])
+            history.append(f"[CURRENT WORLD STATE]:\n{state_str}")
+            
         if context:
-            full_prompt = f"Context:\n{context}\n\nQuery:\n{prompt}"
-        # Call LLM
-        response_text = await self.llm.generate(
-            prompt=full_prompt,
-            system_prompt=system_prompt,
-            temperature=temp
-        )
+            history.append(f"Context:\n{context}")
+        history.append(f"Query:\n{prompt}")
         
-        # Tool Execution Loop (Simple implementation: 1 pass)
-        if "TOOL_CALL:" in response_text:
-            tool_result = ToolsRegistry.execute_tool_call(response_text)
-            response_text += f"\n\n[SYSTEM TOOL OUTPUT]: {tool_result}"
+        import copy
+        full_response_parts = []
+        # Create isolated copy of state for this expert
+        local_data = dict(world_state.data.items())
+        
+        for step in range(MAX_REACT_STEPS):
+            # Update state in history for each step
+            if step > 0:
+                state_str = "\n".join([f"- {k}: {v}" for k, v in local_data.items()])
+                history.append(f"[UPDATED WORLD STATE]:\n{state_str}")
+
+            current_prompt = "\n\n".join(history)
+            
+            response_text = await self.llm.generate(
+                prompt=current_prompt,
+                system_prompt=system_prompt,
+                temperature=temp
+            )
+            
+            full_response_parts.append(response_text)
+            history.append(response_text)
+            
+            # Check for Tool Call
+            if '"tool":' in response_text:
+                try:
+                    start = response_text.find('{')
+                    end = response_text.rfind('}') + 1
+                    if start != -1 and end != -1:
+                        json_str = response_text[start:end]
+                        if '"tool":' in json_str:
+                            tool_res = ToolsRegistry.execute_structured_call(json_str)
+                            # Apply state update
+                            if tool_res.state_update:
+                                local_data.update(tool_res.state_update)
+                            
+                            observation = f"\n[OBSERVATION]: {tool_res.message}"
+                            full_response_parts.append(observation)
+                            
+                            # Track last observation for verified result extraction
+                            last_observation = tool_res.message
+                            
+                            history.append(f"{observation}\n\n[THOUGHT]: Based on the result, I will...")
+                            continue 
+                except Exception:
+                    break
+            
+            break 
+            
+        final_text = "\n\n".join(full_response_parts)
+        
+        # ANTI-HALLUCINATION: Extract verified result from last observation
+        # If there was a tool call, append the verified result
+        if 'last_observation' in dir() and last_observation:
+            # Extract numeric result from observation (e.g., "Result: 49.3")
+            import re
+            match = re.search(r'Result:\s*([\d.]+)', last_observation)
+            if match:
+                verified_result = match.group(1)
+                final_text += f"\n\n[VERIFIED RESULT]: {verified_result}"
             
         return ExpertResponse(
             expert_type=expert_type,
-            response=response_text,
-            confidence=0.8, # Placeholder
+            response=final_text,
+            confidence=0.8,
             temperature_used=temp,
-            reasoning=f"Generated with {expert_type} perspective"
+            reasoning=f"Generated with {expert_type} perspective in {step+1} steps",
+            world_state=local_data
         )
     
     async def consult_all(
         self,
         prompt: str,
+        world_state: WorldState,
         context: str = ""
     ) -> list[ExpertResponse]:
-        """Consult all experts in parallel (for deep path)."""
+        """Consult all experts in parallel."""
         import asyncio
         
         tasks = []
-        tasks = []
         for expert_type in ["neutral", "creative", "conservative", "adversarial", "forecaster"]:
-            tasks.append(self.consult_expert(expert_type, prompt, context))
+            tasks.append(self.consult_expert(expert_type, prompt, world_state, context))
             
         return await asyncio.gather(*tasks)
 

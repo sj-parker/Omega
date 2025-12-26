@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
 
-from models.schemas import PolicySpace
+from models.schemas import PolicySpace, WorldState
 from models.llm_interface import MockLLM, OllamaLLM, LLMRouter
 from core.gatekeeper import Gatekeeper, UserHistoryStore
 from core.context_manager import ContextManager
@@ -90,6 +90,7 @@ class CognitiveSystem:
         )
         
         self._reflection_started = False
+        self.world_states: dict[str, WorldState] = {} # user_id -> WorldState
     
     async def process(self, user_id: str, message: str) -> str:
         """
@@ -106,11 +107,18 @@ class CognitiveSystem:
         # Step 2: Record input in Context Manager
         self.context_manager.record_user_input(message)
         
-        # Step 3: Get context slice (through Memory Gate)
-        context_slice = self.context_manager.get_context_slice(message, identity)
+        # Step 3: Get or create world state for user
+        if user_id not in self.world_states:
+             self.world_states[user_id] = WorldState()
+        
+        # Step 3.1: Get context slice (through Memory Gate)
+        context_slice = self.context_manager.get_context_slice(message, identity, self.world_states[user_id])
         
         # Step 4: Process through Operational Module
         response, decision, trace = await self.om.process(context_slice, self.context_manager)
+        
+        # Step 4.1: Persist updated world state
+        self.world_states[user_id] = context_slice.world_state
         
         # Step 5: Record response
         self.context_manager.record_system_response(response)

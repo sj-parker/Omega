@@ -134,10 +134,28 @@ class ContextEvent:
 
 
 @dataclass
+class WorldState:
+    """Постоянное состояние мира/объектов пользователя."""
+    data: dict[str, Any] = field(default_factory=dict)
+    last_updated: datetime = field(default_factory=datetime.now)
+
+    def update(self, delta: dict[str, Any]) -> None:
+        self.data.update(delta)
+        self.last_updated = datetime.now()
+
+    def to_dict(self) -> dict:
+        return {
+            "data": self.data,
+            "last_updated": self.last_updated.isoformat(),
+        }
+
+
+@dataclass
 class ContextSlice:
     """Срез контекста для ОМ (после Memory Gate)."""
     user_input: str
     user_identity: UserIdentity
+    world_state: WorldState
     recent_events: list[ContextEvent] = field(default_factory=list)
     active_goal: Optional[str] = None
     emotional_state: str = "neutral"
@@ -148,6 +166,7 @@ class ContextSlice:
         return {
             "user_input": self.user_input,
             "user_identity": self.user_identity.to_dict(),
+            "world_state": self.world_state.to_dict(),
             "recent_events": [e.to_dict() for e in self.recent_events],
             "active_goal": self.active_goal,
             "emotional_state": self.emotional_state,
@@ -195,6 +214,7 @@ class RawTrace:
     user_reaction: Optional[str] = None  # follow-up, satisfaction, etc.
     thoughts: str = ""
     validation_report: dict = field(default_factory=dict)
+    world_state_snapshot: dict = field(default_factory=dict)
     
     def to_dict(self) -> dict:
         return {
@@ -209,6 +229,7 @@ class RawTrace:
             "user_reaction": self.user_reaction,
             "thoughts": self.thoughts,
             "validation_report": self.validation_report,
+            "world_state_snapshot": self.world_state_snapshot,
         }
 
 
@@ -262,6 +283,7 @@ class ExpertResponse:
     confidence: float
     temperature_used: float
     reasoning: str = ""
+    world_state: Optional[dict[str, Any]] = None
     
     def to_dict(self) -> dict:
         return {
@@ -270,6 +292,7 @@ class ExpertResponse:
             "confidence": self.confidence,
             "temperature_used": self.temperature_used,
             "reasoning": self.reasoning,
+            "world_state": self.world_state,
         }
 
 

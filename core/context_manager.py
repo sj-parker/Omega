@@ -9,7 +9,7 @@ import sys
 sys.path.insert(0, str(__file__).rsplit('\\', 2)[0])
 
 from models.schemas import (
-    UserIdentity, ContextEvent, ContextSlice, DecisionObject, LongTermFact
+    UserIdentity, ContextEvent, ContextSlice, DecisionObject, LongTermFact, WorldState
 )
 
 
@@ -238,7 +238,8 @@ class ContextManager:
     def get_context_slice(
         self,
         user_input: str,
-        user_identity: UserIdentity
+        user_identity: UserIdentity,
+        world_state: WorldState
     ) -> ContextSlice:
         """
         Get a context slice for OM.
@@ -254,6 +255,7 @@ class ContextManager:
         return ContextSlice(
             user_input=user_input,
             user_identity=user_identity,
+            world_state=world_state,
             recent_events=filtered,
             active_goal=self.short_store.active_goal,
             emotional_state=self.short_store.emotional_state,
