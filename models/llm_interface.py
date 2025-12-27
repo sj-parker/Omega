@@ -359,20 +359,104 @@ class FunctionGemmaLLM(LLMInterface):
         High-level method: given a task, return the appropriate tool call.
         Returns dict with 'tool' and 'arguments', or None if no tool needed.
         """
-        self.set_tools(tools)
+        # Cleanup: Experts improperly use snake_case
+        task_description = task_description.replace("_", " ")
         
-        prompt = f"""Task: {task_description}
+        # STRICT TOOL FILTERING (Code Surgery)
+        # We explicitly restricting the tools available to the LLM based on keywords.
+        # This prevents "search for calculation" errors.
+        
+        filtered_tools = tools # Default: all tools
+        forced_instruction = "" # Initialize variable
+        
+        key_task = task_description.lower()
+        
+        
+        # 1. Search Intent (Prioritize over calc if ambiguous)
+        if any(w in key_task for w in ["search", "find", "limit", "price", "weather", "who", "what", "where", "verify", "check"]):
+             search_tools = [t for t in tools if t.get('function', {}).get('name') in ['search_and_extract', 'verify_fact']]
+             filtered_tools = search_tools
+             forced_instruction = "CONSTRAINT: You MUST use 'search_and_extract' or 'verify_fact'. Do NOT calculate."
+             print(f"[FunctionGemma] Strict Filter: Locked to {[t.get('function', {}).get('name') for t in filtered_tools]}")
 
-Available tools: {[t.get('function', {}).get('name') for t in tools]}
+        # 2. Calculation Intent (Only if NOT search)
+        elif any(w in key_task for w in ["calculate", "compute", "drain", "charge", "linear"]):
+             # Keep calculate AND search tools (Fallback mechanism for complex math/puzzles)
+             filtered_tools = [t for t in tools if "calculate" in t['function']['name'] or "search" in t['function']['name']]
+             forced_instruction = '\nCONSTRAINT: Use "calculate_*" tools ONLY for linear rates. For puzzles, probability, or complex math, use "search_and_extract".'
+             print(f"[FunctionGemma] Strict Filter: Locked to {[t['function']['name'] for t in filtered_tools]}")
+             
+
+        self.set_tools(filtered_tools)
+        
+        # Enhanced prompt with clear tool selection guidance
+        prompt = f"""You are a tool dispatcher. Given a task, select the correct tool and provide arguments.
+
+CRITICAL RULES:
+1. For CURRENT/REAL-TIME data (prices, weather, news, exchange rates) -> ALWAYS use "search_and_extract"
+2. For mathematical calculations (linear change, projections) -> use "calculate_linear_change"
+3. For resource allocation -> use "calculate_resource_allocation"
+4. For fact verification -> use "verify_fact"
+
+Task: {task_description}
+
+Available tools: {[t.get('function', {}).get('name') for t in filtered_tools]}
 
 {f"Context: {context}" if context else ""}
 
-Choose the appropriate tool and provide arguments. Output ONLY the tool call."""
+IMPORTANT RULES FOR search_and_extract:
+- The "query" should be a CLEAN, SIMPLE search phrase matching the task.
+- "target" is optional (use if specific data needed).
+- DO NOT use search_and_extract for calculations!
 
-        response = await self.generate(prompt, temperature=0.1)
+IMPORTANT RULES FOR calculate_linear_change:
+- Use this tool if the task involves "calculate", "compute", "drain", "charge", "rate".
+- Do NOT search for how to calculate. Use the tool directly.
+- PRESERVE PRECISION: Do NOT round numbers. Use 83.4, not 83.
+- PERCENTAGES: "2% per minute" means rate = -2 (minus 2 units), NOT -0.02.
+
+EXAMPLES:
+Task: "Check weather in London" -> {{"tool": "search_and_extract", "arguments": {{"query": "current weather London", "target": "weather"}}}}
+Task: "Apple stock price" -> {{"tool": "search_and_extract", "arguments": {{"query": "current Apple stock price", "target": "price"}}}}
+Task: "Calculate battery drain from 83.4% with -1.4 rate" -> {{"tool": "calculate_linear_change", "arguments": {{"start": 83.4, "rate": -1.4, "time": 10, "variable_name": "final_charge"}}}}
+Task: "calculate_linear_change for battery..." -> {{"tool": "calculate_linear_change", ...}}
+
+{forced_instruction}
+
+Output ONLY valid JSON: {{"tool": "tool_name", "arguments": {{...}}}}"""
+
+        response = await self.generate(prompt, temperature=0.0)
+
         
         try:
             import json
-            return json.loads(response)
+            data = json.loads(response)
+            
+            # HALLUCINATION DETECTION: Check if query is relevant to task
+            if data.get("tool") == "search_and_extract":
+                query = data.get("arguments", {}).get("query", "").lower()
+                task_lower = task_description.lower()
+                
+                # Known hallucination patterns
+                HALLUCINATION_PHRASES = ["weather london", "current weather", "check weather", 
+                                          "search_and_extract", "search for real-time"]
+                
+                is_hallucination = any(phrase in query for phrase in HALLUCINATION_PHRASES)
+                task_mentions_weather = any(w in task_lower for w in ["weather", "погода", "london", "лондон"])
+                
+                if is_hallucination and not task_mentions_weather:
+                    print(f"[FunctionGemma] HALLUCINATION DETECTED: '{query[:50]}' unrelated to '{task_description[:50]}'")
+                    # Fallback: use task description as query
+                    return {"tool": "search_and_extract", "arguments": {"query": task_description}}
+            
+            # HEALING: If model returns raw args {"start":...} without "tool" wrapper
+            if isinstance(data, dict) and "tool" not in data:
+                 if len(filtered_tools) == 1:
+                      guessed_tool = filtered_tools[0]['function']['name']
+                      print(f"[FunctionGemma] JSON HEALING: Wrapping raw args for {guessed_tool}")
+                      return {"tool": guessed_tool, "arguments": data}
+            
+            return data
         except:
             return None
+

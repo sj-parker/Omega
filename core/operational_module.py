@@ -29,6 +29,7 @@ Categories:
 - creative: requires generation of content, ideas
 - complex: multi-step tasks, unclear requirements
 - confirmation: simple acknowledgements, agreements, or announcements of immediate actions (e.g. "ok", "uploading now", "wait")
+- realtime_data: requests for CURRENT/LIVE data that changes over time (e.g. stock prices, crypto prices, weather, exchange rates, news headlines). THIS REQUIRES REAL-TIME SEARCH.
 
 Output format:
 INTENT: [category]
@@ -106,9 +107,23 @@ class OperationalModule:
             # Fast path: single LLM call
             response = await self._fast_response(context_slice)
             
+            # DEPTH ESCALATION: If FAST response needs tools, escalate to DEEP
+            if "NEED_TOOL:" in response:
+                print(f"[OM] Escalating from FAST to DEEP (tool required)")
+                thoughts = await self._generate_thoughts(context_slice)
+                response, expert_outputs, critic_output = await self._deep_response(context_slice, thoughts)
+                depth = DecisionDepth.DEEP
+            
         elif depth == DecisionDepth.MEDIUM:
             # Medium path: LLM + memory context
             response = await self._medium_response(context_slice)
+            
+            # DEPTH ESCALATION: If MEDIUM response needs tools, escalate to DEEP
+            if "NEED_TOOL:" in response:
+                print(f"[OM] Escalating from MEDIUM to DEEP (tool required)")
+                thoughts = await self._generate_thoughts(context_slice)
+                response, expert_outputs, critic_output = await self._deep_response(context_slice, thoughts)
+                depth = DecisionDepth.DEEP
             
         else:  # DEEP
             # Deep path: experts + critic
@@ -122,13 +137,17 @@ class OperationalModule:
                      break
             
         # Step 3: Semantic/Logic Guardrail
+        # CRITICAL: Bypass validator for intermediate tool commands
         validation_report = {}
         if depth in [DecisionDepth.MEDIUM, DecisionDepth.DEEP]:
-            # Use full reasoning context for validation
-            validation_context = f"{context_slice.long_term_context or ''}\n\nUser Input: {context_slice.user_input}"
-            response, validation_report = await self.validator.validate(response, validation_context)
-            if validation_report.get("status") == "failed":
-                print("[OM] Response corrected by Guardrail.")
+            if "NEED_TOOL:" in response or "search" in response.lower()[:50]:
+                 print("[OM] Skipping validation for Tool Command.")
+            else:
+                # Use full reasoning context for validation
+                validation_context = f"{context_slice.long_term_context or ''}\n\nUser Input: {context_slice.user_input}"
+                response, validation_report = await self.validator.validate(response, validation_context)
+                if validation_report.get("status") == "failed":
+                    print("[OM] Response corrected by Guardrail.")
         
         # Calculate cost
         elapsed_ms = int((time.time() - start_time) * 1000)
@@ -162,6 +181,27 @@ class OperationalModule:
     async def _classify_intent(self, user_input: str) -> tuple[str, float]:
         """Classify user intent and estimate confidence."""
         
+        # PRE-LLM KEYWORD CHECK: Force realtime_data for known data queries
+        input_lower = user_input.lower()
+        REALTIME_KEYWORDS = [
+            "bitcoin", "btc", "ethereum", "crypto", "price", "цена", "стоит", 
+            "курс", "погода", "weather", "stock", "акци", "exchange rate",
+            "сегодня стоит", "текущ", "актуальн", "current", "live", "real-time"
+        ]
+        # Require 2+ keyword matches to prevent false positives (e.g. "текущий статус")
+        realtime_matches = sum(1 for kw in REALTIME_KEYWORDS if kw in input_lower)
+        if realtime_matches >= 2:
+            print(f"[OM] KEYWORD OVERRIDE: Detected realtime data request ({realtime_matches} keywords) -> forcing DEEP path")
+            return "realtime_data", 0.95
+
+        CALC_KEYWORDS = [
+            "calculate", "compute", "посчитай", "рассчитай", "math", 
+            "linear change", "rate=", "start=", "equation"
+        ]
+        if any(kw in input_lower for kw in CALC_KEYWORDS):
+             print(f"[OM] KEYWORD OVERRIDE: Detected calculation request -> forcing DEEP path")
+             return "calculation", 0.95
+        
         # Use generate_fast if available to speed up intent classification
         if hasattr(self.llm, 'generate_fast'):
             response = await self.llm.generate_fast(
@@ -191,6 +231,7 @@ class OperationalModule:
                     pass
         
         return intent, confidence
+
     
     def _decide_depth(
         self,
@@ -215,6 +256,10 @@ class OperationalModule:
                     return forced_depth
                 except ValueError:
                     pass
+        
+        # PRIORITY: Realtime data & Calculation ALWAYS requires DEEP path (tools)
+        if intent in ["realtime_data", "calculation"]:
+            return DecisionDepth.DEEP
         
         # Fast path conditions
         if intent == "smalltalk" and confidence > 0.7:
@@ -305,9 +350,18 @@ User message: {context.user_input}"""
         if thoughts:
             context_str = f"INTERNAL THOUGHTS FOR FOCUS: {thoughts}\n\n" + context_str
 
-        # Ensure we use main LLM for experts (quality-critical)
         if hasattr(self.llm, 'set_mode'):
             self.llm.set_mode("main")
+            
+        # CONTEXT PURGE (Context Pruning):
+        # If the task is purely about data retrieval (realtime_data),
+        # prevent mathematical hallucinations by scrubbing old calculation results.
+        intent, _ = await self._classify_intent(context.user_input)
+        if intent == "realtime_data":
+             import re
+             # Remove "Result: X" and "Formula: Y" lines to prevent context contamination
+             context_str = re.sub(r"(Result:|Formula:).*", "", context_str)
+             print(f"[OM] Context Purge Active: Scrubbed calculation artifacts for Search task.")
         
         # Consult all experts
         expert_responses = await self.experts.consult_all(

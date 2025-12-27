@@ -18,41 +18,66 @@ EXPERT_PROMPTS = {
 You are OMEGA-DISPATCHER, a non-coding tool interface.
 Your ONLY capability is to break down requests into tool calls.
 
-⛔ VISUALIZATION OF ERROR:
-User: "Calculate 2+2"
-You (WRONG): "print(2+2)"  <-- DO NOT DO THIS. YOU HAVE NO PYTHON INTERPRETER.
-You (WRONG): "def add(a,b): return a+b" <-- NO CODING ASSISTANT BEHAVIOR.
-You (CORRECT): "NEED_TOOL: calculate linear change..."
+🚨 MANDATORY FIRST ACTION FOR REALTIME DATA:
+If the user asks about ANY of these: price, cost, rate, exchange, weather, news, stock, crypto, Bitcoin, today's data...
+YOUR VERY FIRST RESPONSE MUST BE: "NEED_TOOL: search <query>"
+DO NOT provide any answer before getting search results. You do NOT have current data.
 
-✅ CRITICAL PROTOCOL:
-1. If you need data (prices, news) -> Write "NEED_TOOL: search <query>"
-2. If you need math -> Write "NEED_TOOL: calculate..."
-3. DO NOT write Python/JS/Pseudo-code.
-4. DO NOT output JSON directly (FunctionGemma will do that).
+Example 1 (Search):
+User: "What is the weather in London?"
+You: "NEED_TOOL: search weather in London"
 
-GOAL: Solve the user's request using ONLY natural language thoughts and `NEED_TOOL:` commands.
-After final [OBSERVATION], write: "RESULT: X"
+Example 2 (Math):
+User: "Calculate battery drain from 100% at -5 rate for 10 mins"
+You: "NEED_TOOL: calculate_linear_change arguments: start=100 rate=-5 time=10"
+
+Example 3 (Conflict):
+User: "Data mismatch: 1939 or 1941?"
+You: "NEED_TOOL: verify_fact arguments: fact='start date of WWII'"
+
+⛔ NEVER DO THIS:
+- Guessing prices from memory (your training data is outdated!)
+- Writing code
+- Providing answers without using tools first
+
+✅ CORRECT PROTOCOL:
+1. REALTIME DATA → "NEED_TOOL: search <query>" (ALWAYS FIRST!)
+2. MATH → "NEED_TOOL: calculate..."
+3. After [OBSERVATION] → STOP CALLING TOOLS! Use the data to answer.
+
+⚡ ATOMICITY RULE:
+Do NOT combine requests. Search for ONE fact at a time.
+WRONG: "NEED_TOOL: get weather and gold price"
+CORRECT: "NEED_TOOL: search weather in Poltava" (wait) -> "NEED_TOOL: search gold price"
+
+🏆 FINAL ANSWER RULE:
+Always use the VERY LAST result from the [OBSERVATION] for your final answer.
+Ignore earlier calculations if a newer one exists.
+
+🛑 STOP LOOPING RULE:
+If the context already contains [OBSERVATION] with the data you need:
+DO NOT call "NEED_TOOL" again.
+Instead, write: "RESULT: <answer based on observation>"
+
+GOAL: Use tools first, then answer based on [OBSERVATION] data.
 """,
 
-    "creative": """You are a creative problem-solver. Be CONCISE.
-Propose innovative solutions, but respect constraints.
-Use tools for calculations.""",
 
-    "conservative": """You are a risk analyst. Be CONCISE.
-Identify risks and edge cases.
-Use tools for calculations.""",
+    "creative": """You are a Creative Analyst. Be CONCISE.
+Propose innovative search queries to find rare information.
+DO NOT perform calculations unless explicitly requested.""",
+
+    "conservative": """You are a Risk Analyst. Be CONCISE.
+Verify information from multiple angles.
+DO NOT perform calculations unless explicitly requested.""",
 
     "adversarial": """You are a Devil's Advocate. Be CONCISE.
-Find flaws and contradictions.
-If math doesn't match text, expose it.
-Use tools to verify claims.""",
+Question the findings. Look for contradictions.
+DO NOT perform calculations unless explicitly requested.""",
 
     "forecaster": """You are a Strategic Forecaster. Be CONCISE.
-USE TOOLS for calculations. Do not guess.
-```json
-{"tool": "calculate_linear_change", "arguments": {"start": X, "rate": Y, "time": T}}
-```
-For plans, generate 2-3 scenarios with probabilities."""
+Look for long-term trends and consequences.
+DO NOT perform calculations unless explicitly requested."""
 }
 
 
@@ -80,6 +105,19 @@ class ExpertsModule:
         # Modified prompt for FunctionGemma integration
         system_prompt = EXPERT_PROMPTS.get(expert_type, EXPERT_PROMPTS["neutral"])
         
+        # DYNAMIC DATE INJECTION: Tell the model what today's date is
+        from datetime import datetime
+        current_date = datetime.now().strftime("%d.%m.%Y")
+        system_prompt = f"""[TODAY'S DATE: {current_date}]
+When searching for current data, always use this date as 'today'.
+
+🛡️ CONTEXT ISOLATION:
+Focus ONLY on the current user request.
+Ignore previous topics (e.g., past dates or events) unless they are directly related.
+Do NOT hallucinate connections between unrelated queries.
+
+""" + system_prompt
+        
         if self.tool_caller:
            system_prompt += """
            
@@ -87,7 +125,11 @@ class ExpertsModule:
            If you need to calculate something, do NOT output JSON.
            Instead, write: "NEED_TOOL: <description of calculation>"
            Example: "NEED_TOOL: calculate linear change for battery from 83.4 with -1.4 rate for 12 mins"
+           
+           IMPORTANT: Write ONLY ONE NEED_TOOL command per response, then WAIT for [OBSERVATION].
+           Do NOT chain multiple NEED_TOOL commands in one message.
            """
+
         
         # Determine temperature
         if expert_type == "creative":
@@ -115,6 +157,9 @@ class ExpertsModule:
         # Create isolated copy of state for this expert
         local_data = dict(world_state.data.items())
         
+        # DEDUPLICATION: Track recent tool queries to prevent loops
+        recent_tool_queries = []
+        
         for step in range(MAX_REACT_STEPS):
             # Update state in history for each step
             if step > 0:
@@ -129,9 +174,6 @@ class ExpertsModule:
                 temperature=temp
             )
             
-            full_response_parts.append(response_text)
-            history.append(response_text)
-            
             # --- GUARDRAIL: Detect Python Code Hallucination ---
             # If the model tries to write code blocks or functions, stop it.
             if "```python" in response_text or ("def " in response_text and "return " in response_text):
@@ -143,17 +185,33 @@ STOP writing code.
 Use the tool: "NEED_TOOL: <description>"
 Try again properly.
 """
-                full_response_parts.append(warning_msg)
+                # Appending to history so model knows it failed, but NOT to full_response_parts (User view)
+                history.append(response_text)
                 history.append(warning_msg)
                 continue
             # ----------------------------------------------------
+            
+            # If passed guardrail, add to history and user output
+            full_response_parts.append(response_text)
+            history.append(response_text)
 
             # 1. Parse for NEED_TOOL intent (for FunctionGemma)
             if self.tool_caller and "NEED_TOOL:" in response_text:
                 import re
-                match = re.search(r"NEED_TOOL:\s*(.+)", response_text)
+                # Extract ONLY the first NEED_TOOL command, stopping at newline or next NEED_TOOL
+                match = re.search(r"NEED_TOOL:\s*([^\n]+?)(?:\s*NEED_TOOL:|$)", response_text)
                 if match:
                     task_desc = match.group(1).strip()
+                    # Clean up any trailing quotes or JSON artifacts
+                    task_desc = re.sub(r'^["\'\{\[]+|["\'\}\]]+$', '', task_desc).strip()
+                    
+                    # DEDUPLICATION: Skip if same query was just made
+                    if task_desc in recent_tool_queries[-3:]:
+                        print(f"[Experts] DEDUP: Skipping repeated query: {task_desc[:50]}...")
+                        history.append("[SYSTEM]: This query was already made. Please analyze existing observations or try a different approach.")
+                        continue
+                    recent_tool_queries.append(task_desc)
+                    
                     print(f"[Experts] Delegating to FunctionGemma: {task_desc}")
                     
                     # FunctionGemma generates the PRECISE JSON
@@ -161,8 +219,17 @@ Try again properly.
                     tool_json = await self.tool_caller.call_tool(task_desc, tools_def)
                     
                     if tool_json:
+                        print(f"[Experts] FunctionGemma returned: {tool_json}")
                         # Execute the generated JSON
-                        tool_res = ToolsRegistry.execute_structured_call(json.dumps(tool_json))
+                        try:
+                            tool_res = ToolsRegistry.execute_structured_call(json.dumps(tool_json))
+                            print(f"[Experts] Tool executed: {tool_res.message[:100]}...")
+                        except Exception as e:
+                            print(f"[Experts] Tool execution FAILED: {e}")
+                            observation = f"\n[OBSERVATION]: Tool error: {e}"
+                            full_response_parts.append(observation)
+                            history.append(observation)
+                            continue
                         
                         # Apply state update
                         if tool_res.state_update:
@@ -174,8 +241,11 @@ Try again properly.
                         # Track last observation for verified result extraction
                         last_observation = tool_res.message
                         
-                        history.append(f"{observation}\n\n[THOUGHT]: Based on the result, I will...")
+                        history.append(f"{observation}\n\n[SYSTEM]: You have received the observation. Now ANALYZE it and ANSWER the user's request. Do NOT call tools again for the same data.")
                         continue
+                    else:
+                        print(f"[Experts] FunctionGemma returned None for task: {task_desc}")
+
 
             # 2. Fallback: Parse legacy JSON (if FunctionGemma not used or Main LLM hallucinates JSON)
             if '"tool":' in response_text:
@@ -206,14 +276,26 @@ Try again properly.
         final_text = "\n\n".join(full_response_parts)
         
         # ANTI-HALLUCINATION: Extract verified result from last observation
-        # If there was a tool call, append the verified result
+        # Handle both calculator results (Result: X) and search facts (Fact: Y)
         if 'last_observation' in dir() and last_observation:
-            # Extract numeric result from observation (e.g., "Result: 49.3")
             import re
+            # Try to extract calculator result
             match = re.search(r'Result:\s*([\d.]+)', last_observation)
             if match:
                 verified_result = match.group(1)
                 final_text += f"\n\n[VERIFIED RESULT]: {verified_result}"
+            # Try to extract search fact (e.g., Fact: Bitcoin price is $88,000)
+            elif "Fact:" in last_observation:
+                # Extract the fact content
+                fact_match = re.search(r'Fact:\s*(.+?)(?:\s*\(Confidence:|$)', last_observation, re.DOTALL)
+                if fact_match:
+                    fact = fact_match.group(1).strip()
+                    final_text += f"\n\n[SEARCH RESULT]: {fact}"
+        
+        # Fallback if the model failed completely (e.g. stubbornly writing code that was intercepted)
+        if not final_text.strip():
+            final_text = "[SYSTEM ERROR]: Unable to generate a valid response after multiple attempts. The model may be hallucinating or failing to use tools correctly."
+
             
         return ExpertResponse(
             expert_type=expert_type,
@@ -242,23 +324,31 @@ Try again properly.
 
 CRITIC_PROMPT = """You are a rigorous Judge and Fact-Checker (CoVe Enforcer).
 
+⚠️ CRITICAL ANTI-HALLUCINATION RULE:
+If an expert response contains [OBSERVATION] or [SEARCH RESULT], these are REAL DATA from external tools.
+You MUST use the exact values from [OBSERVATION]/[SEARCH RESULT] as authoritative ground truth.
+DO NOT make up or estimate numbers. Use ONLY the values from tool outputs.
+
 Phase 1: Chain of Verification (CoVe)
 - Identify key Facts/Claims in the expert responses.
+- CHECK: If [SEARCH RESULT] exists, extract the EXACT number from it and use it.
 - CHECK DIMENSIONS: Ensure formulas are valid (e.g. Rate * Time = Unit). Catch "Magic Math" (e.g. % * min).
 - Generate Verification Questions (e.g. "Is the sum correct?", "Is the definition of X specific to source Y?").
-- ANSWER the questions yourself.
+- ANSWER the questions yourself using ONLY [OBSERVATION]/[SEARCH RESULT] data.
 
 Phase 2: Synthesis
 - If Forecaster provided scenarios, select the most robust one (check negative constraints).
 - If Adversarial Agent found flaws, address them directly.
 - Combine the verified facts into a final response.
+- THE FINAL NUMBERS MUST MATCH [OBSERVATION]/[SEARCH RESULT] EXACTLY.
 
 Output structure:
 [VERIFICATION PHASE]
 ... (Questions and Answers) ...
 
 [FINAL SYNTHESIS]
-... (The definitive answer) ..."""
+... (The definitive answer using EXACT values from tool outputs) ..."""
+
 
 
 class CriticModule:

@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from main import CognitiveSystem
 from models.llm_interface import MockLLM
+from models.schemas import WorldState
 
 class ReActMockLLM(MockLLM):
     def __init__(self):
@@ -64,7 +65,8 @@ async def test_react_loop():
     print("\n[Step 1] Asking Expert to allocate resources (Expect 2 Tool Calls)...")
     response = await system.om.experts.consult_expert(
         "neutral", 
-        "Allocate resources. We need 100 if possible, otherwise as much as you can up to 50.", 
+        "Allocate resources. We need 100 if possible, otherwise as much as you can up to 50.",
+        world_state=WorldState(data={}),
         context=""
     )
     
