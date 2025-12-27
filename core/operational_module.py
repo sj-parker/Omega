@@ -371,7 +371,7 @@ class OperationalModule:
         NO_EXPERT_INTENTS = [
             "self_reflection",      # Self-analysis questions
             "internal_query",       # Omega architecture
-            "calculation_simple",   # Simple math like 178*24
+            # calculation_simple REMOVED - User wants tools for accuracy
             "unknown_internal",     # Non-existent modules
             "philosophical",        # Introspective/ethical questions
             "analytical"            # Logic puzzles
@@ -381,7 +381,8 @@ class OperationalModule:
             return DecisionDepth.FAST
         
         # PRIORITY: Realtime data & Calculation ALWAYS requires DEEP path (tools)
-        if intent in ["realtime_data", "calculation"]:
+        # PRIORITY: Realtime data & Calculation ALWAYS requires DEEP path (tools)
+        if intent in ["realtime_data", "calculation", "calculation_simple"]:
             return DecisionDepth.DEEP
         
         # Fast path conditions
