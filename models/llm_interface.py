@@ -437,14 +437,32 @@ Output ONLY valid JSON: {{"tool": "tool_name", "arguments": {{...}}}}"""
                 query = data.get("arguments", {}).get("query", "").lower()
                 task_lower = task_description.lower()
                 
-                # Known hallucination patterns
-                HALLUCINATION_PHRASES = ["weather london", "current weather", "check weather", 
-                                          "search_and_extract", "search for real-time"]
+                # Known hallucination patterns (expanded)
+                HALLUCINATION_PHRASES = [
+                    "weather london", "weather berlin", "weather", "current weather", 
+                    "check weather", "real-time weather", "погода",
+                    "search_and_extract", "search for real-time", "search me for",
+                    "apple stock", "stock price"
+                ]
                 
-                is_hallucination = any(phrase in query for phrase in HALLUCINATION_PHRASES)
-                task_mentions_weather = any(w in task_lower for w in ["weather", "погода", "london", "лондон"])
+                # Check for explicit hallucination phrases
+                is_known_hallucination = any(phrase in query for phrase in HALLUCINATION_PHRASES)
                 
-                if is_hallucination and not task_mentions_weather:
+                # Check if task mentions these topics legitimately
+                WEATHER_KEYWORDS = ["weather", "погода", "london", "лондон", "berlin", "берлін", "temperature", "температура"]
+                STOCK_KEYWORDS = ["stock", "акці", "apple", "price", "ціна", "курс"]
+                
+                task_is_about_weather = any(w in task_lower for w in WEATHER_KEYWORDS)
+                task_is_about_stocks = any(w in task_lower for w in STOCK_KEYWORDS)
+                
+                # Semantic relevance check: query should share at least one meaningful word with task
+                task_words = set(w for w in task_lower.split() if len(w) > 3)
+                query_words = set(w for w in query.split() if len(w) > 3)
+                shared_words = task_words & query_words
+                
+                is_semantically_irrelevant = len(shared_words) == 0 and len(task_words) > 2
+                
+                if (is_known_hallucination and not task_is_about_weather and not task_is_about_stocks) or is_semantically_irrelevant:
                     print(f"[FunctionGemma] HALLUCINATION DETECTED: '{query[:50]}' unrelated to '{task_description[:50]}'")
                     # Fallback: use task description as query
                     return {"tool": "search_and_extract", "arguments": {"query": task_description}}
