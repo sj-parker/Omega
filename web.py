@@ -55,12 +55,12 @@ class CognitiveSystemWeb:
             else:
                 self.llm = OllamaLLM(model=self.main_model)
             
-            # Initialize FunctionGemma for tool calling
+            # Initialize Tool Caller (Qwen2.5)
             try:
-                self.tool_caller = FunctionGemmaLLM()
-                print("[System] FunctionGemma tool caller initialized.")
+                self.tool_caller = FunctionGemmaLLM() # Uses Qwen2.5 default now
+                print("[System] Tool Caller (Qwen2.5) initialized.")
             except Exception as e:
-                print(f"[System] Failed to init FunctionGemma: {e}")
+                print(f"[System] Failed to init Tool Caller: {e}")
         else:
             self.llm = MockLLM()
         

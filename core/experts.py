@@ -85,7 +85,46 @@ DO NOT perform calculations unless explicitly requested.""",
 
     "forecaster": """You are a Strategic Forecaster. Be CONCISE.
 Look for long-term trends and consequences.
-DO NOT perform calculations unless explicitly requested."""
+DO NOT perform calculations unless explicitly requested.""",
+
+    "physics": """You are a Physics Simulator. Your job is to MENTALLY SIMULATE physical scenarios.
+
+🔬 MENTAL SIMULATION PROTOCOL:
+Before answering ANY physics question, you MUST:
+
+1. **IDENTIFY OBJECTS**: List all physical objects in the scenario
+   - Material, mass, size, state (solid/liquid/gas)
+
+2. **IDENTIFY FORCES & CONDITIONS**: What forces/conditions act on each object?
+   - Gravity, friction, pressure, tension, buoyancy
+   - Temperature, atmosphere (vacuum = no air/oxygen)
+
+3. **SIMULATE STEP-BY-STEP**: What happens over time?
+   - t=0: Initial state
+   - t=1s: First changes (immediate effects)
+   - t=10s: Secondary effects
+   - Continue until equilibrium or requested state
+
+4. **CHECK PHYSICS LAWS**:
+   - Conservation of energy
+   - Conservation of momentum  
+   - Thermodynamics (heat flows hot→cold)
+   - Pressure (liquids boil in vacuum at ANY temperature)
+   - No oxygen = no combustion
+
+⚠️ COMMON TRAPS TO AVOID:
+- Candle in vacuum: No oxygen = no flame. Flame dies INSTANTLY.
+- Water in vacuum: Boils at room temperature due to low pressure.
+- Human at 50km altitude: No oxygen, near-vacuum pressure = death in seconds.
+- Gravity doesn't stop: Objects fall unless supported by a surface.
+
+Output format:
+[OBJECTS]: List objects with properties
+[CONDITIONS]: Forces, atmosphere, temperature
+[SIMULATION]: t=0... t=1s... t=10s...
+[ANSWER]: Based on simulation, the answer is...
+
+BE PRECISE. Physics has no mercy for hand-waving."""
 }
 
 
@@ -228,6 +267,37 @@ Try again properly.
                     
                     if tool_json:
                         print(f"[Experts] FunctionGemma returned: {tool_json}")
+                        
+                        # HANDLE DIRECT CALCULATION (math bypass from FunctionGemma)
+                        if tool_json.get("tool") == "direct_calculation":
+                            result = tool_json.get("arguments", {}).get("result")
+                            expr = tool_json.get("arguments", {}).get("expression")
+                            observation = f"\n[OBSERVATION]: Calculation result: {expr} = {result}"
+                            full_response_parts.append(observation)
+                            history.append(observation)
+                            print(f"[Experts] Direct calculation: {expr} = {result}")
+                            continue
+
+                        # HANDLE 'NONE' or INVALID TOOL (Graceful degradation)
+                        tool_name = tool_json.get("tool", "").lower()
+                        if not tool_name or tool_name == "none":
+                            print(f"[Experts] No valid tool selected (received '{tool_name}'). Skipping.")
+                            # Inform the expert that no tool was used, so it doesn't hallucinate a result
+                            observation = "\n[SYSTEM]: No suitable tool found for this request. Rely on your own knowledge."
+                            history.append(observation)
+                            continue
+                        
+                        # EXPERT AUTHORITY CHECK: Block certain operations
+                        # tool_name is already lower() above
+                        query = tool_json.get("arguments", {}).get("query", "").lower()
+                        
+                        # Block experts from searching for internal Omega architecture
+                        if "omega" in query or "модуль" in query or "internal" in query:
+                            print(f"[Experts] AUTHORITY BLOCK: Expert tried to search internal architecture")
+                            observation = "\n[OBSERVATION]: Query about internal architecture blocked. Use existing knowledge."
+                            history.append(observation)
+                            continue
+                        
                         # Execute the generated JSON
                         try:
                             tool_res = ToolsRegistry.execute_structured_call(json.dumps(tool_json))
@@ -324,7 +394,7 @@ Try again properly.
         import asyncio
         
         tasks = []
-        for expert_type in ["neutral", "creative", "conservative", "adversarial", "forecaster"]:
+        for expert_type in ["neutral", "creative", "conservative", "adversarial", "forecaster", "physics"]:
             tasks.append(self.consult_expert(expert_type, prompt, world_state, context))
             
         return await asyncio.gather(*tasks)
@@ -377,7 +447,8 @@ class CriticModule:
     async def analyze(
         self,
         expert_responses: list[ExpertResponse],
-        original_query: str
+        original_query: str,
+        intent: str = "neutral"
     ) -> CriticAnalysis:
         """Analyze expert responses using CoVe."""
         
@@ -387,10 +458,28 @@ class CriticModule:
             for r in expert_responses
         ])
         
+        # Dynamic weighting based on intent
+        weighting_instruction = ""
+        if intent == "creative":
+            weighting_instruction = "PRIORITY: Focus on NOVELTY and IDEAS. Trust the CREATIVE EXPERT's perspective most."
+        elif intent == "forecasting":
+            weighting_instruction = "PRIORITY: Focus on FUTURE TRENDS. Trust the FORECASTER's scenario analysis."
+        elif intent == "conservative":
+            weighting_instruction = "PRIORITY: Focus on SAFETY and RISKS. Trust the CONSERVATIVE EXPERT."
+        elif intent == "analytical":
+            weighting_instruction = "PRIORITY: Focus on LOGIC and REASONING. Trust the ADVERSARIAL EXPERT to find flaws."
+        elif intent == "realtime_data":
+            weighting_instruction = "PRIORITY: Focus on FACTS. Trust the [OBSERVATION] data above all opinions."
+        elif intent == "physics":
+            weighting_instruction = "PRIORITY: Focus on PHYSICAL SIMULATION. Trust the PHYSICS EXPERT's step-by-step simulation. Verify against physics laws."
+        
         prompt = f"""Original Query: {original_query}
 
 Expert Responses:
 {expert_summary}
+
+Context/Intent: {intent}
+{weighting_instruction}
 
 Perform Chain of Verification (CoVe) and Synthesis."""
         

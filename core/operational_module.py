@@ -15,6 +15,7 @@ from models.schemas import (
 from models.llm_interface import LLMInterface
 from core.experts import ExpertsModule, CriticModule
 from core.validator import SemanticValidator
+from core.ontology import is_internal_query, entity_exists, extract_entity_name, should_block_search, get_ontology_response
 
 
 # Intent classification prompts
@@ -99,7 +100,14 @@ class OperationalModule:
         expert_outputs = []
         critic_output = None
         
-        if intent == "memorize" and context_manager:
+        # ONTOLOGY GATE ENFORCEMENT: Block fabrication of non-existent entities
+        if intent == "unknown_internal":
+            entity_name = extract_entity_name(context_slice.user_input) or "unknown"
+            response = get_ontology_response(entity_name)
+            print(f"[OM] ONTOLOGY GATE: Refused to fabricate entity '{entity_name}'")
+            depth = DecisionDepth.FAST
+            
+        elif intent == "memorize" and context_manager:
             # Special case for memorization
             response = await self._memorize_and_respond(context_slice, context_manager)
             depth = DecisionDepth.FAST # Memorization is usually fast
@@ -181,8 +189,33 @@ class OperationalModule:
     async def _classify_intent(self, user_input: str) -> tuple[str, float]:
         """Classify user intent and estimate confidence."""
         
-        # PRE-LLM KEYWORD CHECK: Force realtime_data for known data queries
+        # ═══════════════════════════════════════════════════════════════
+        # ONTOLOGY GATE: Block fabrication of non-existent internal modules
+        # ═══════════════════════════════════════════════════════════════
         input_lower = user_input.lower()
+        
+        # Check if query is about internal Omega architecture
+        if is_internal_query(user_input):
+            entity_name = extract_entity_name(user_input)
+            if entity_name and not entity_exists(entity_name):
+                print(f"[OM] ONTOLOGY GATE: Entity '{entity_name}' not found in registry -> blocking fabrication")
+                return "unknown_internal", 0.99  # High confidence refusal
+            print(f"[OM] ONTOLOGY GATE: Valid internal query about '{entity_name or 'Omega'}'")
+        
+        # Check if search should be blocked
+        block_search, reason = should_block_search(user_input)
+        if block_search:
+            print(f"[OM] SEARCH BLOCKED: Reason='{reason}' -> forcing MEDIUM path (no tools)")
+            if reason == "math_expression":
+                return "calculation_simple", 0.95  # Simple math, no tools needed
+            elif reason == "self_analysis":
+                return "self_reflection", 0.90  # Internal reflection, no search
+            else:
+                return "internal_query", 0.90  # Architecture query, no search
+        
+        # ═══════════════════════════════════════════════════════════════
+        # PRE-LLM KEYWORD CHECK: Force realtime_data for known data queries
+        # ═══════════════════════════════════════════════════════════════
         REALTIME_KEYWORDS = [
             "bitcoin", "btc", "ethereum", "crypto", "price", "цена", "стоит", 
             "курс", "погода", "weather", "stock", "акци", "exchange rate",
@@ -193,6 +226,62 @@ class OperationalModule:
         if realtime_matches >= 2:
             print(f"[OM] KEYWORD OVERRIDE: Detected realtime data request ({realtime_matches} keywords) -> forcing DEEP path")
             return "realtime_data", 0.95
+
+        # REASONING/LOGIC PUZZLES: These should be solved by thinking, not searching
+        REASONING_KEYWORDS = [
+            # Math word problems
+            "сколько", "скільки", "how many", "how much", "посчитай", "порахуй",
+            "в два раза", "в три раза", "больше чем", "менше ніж", "більше ніж",
+            # Logic puzzles
+            "лишний", "лишнее", "зайвий", "odd one out", "какой не подходит",
+            "что произойдет", "що станеться", "what will happen", "what happens",
+            # Physical reasoning
+            "распилили", "розпиляли", "покрасили", "пофарбували", "разрезали",
+            "грани", "грані", "кубик", "куб",
+            # Riddles
+            "загадка", "riddle", "головоломка", "puzzle",
+            # Comparisons that need logic
+            "физическ", "фізичн", "механическ", "зеркальн", "дзеркальн",
+            # Date/time awareness (system knows the date)
+            "какой сегодня", "який сьогодні", "what day", "what date", "сегодня день"
+        ]
+        reasoning_matches = sum(1 for kw in REASONING_KEYWORDS if kw in input_lower)
+        # Require 2+ matches to avoid false positives like "честнее" triggering
+        if reasoning_matches >= 2:
+            print(f"[OM] REASONING OVERRIDE: Detected logic puzzle ({reasoning_matches} keywords) -> using MEDIUM path for pure reasoning")
+            return "analytical", 0.85  # MEDIUM path - will use LLM reasoning without tools
+
+        # PHILOSOPHICAL/INTROSPECTIVE: These should use internal knowledge, NOT search
+        PHILOSOPHICAL_KEYWORDS = [
+            # Self-reflection
+            "честн", "honest", "правд", "truth", "ограничен", "limitation",
+            "сомнен", "doubt", "уверен", "confiden", "ошиб", "mistake", "error",
+            # Ethics/philosophy  
+            "этик", "ethic", "мораль", "moral", "парадокс", "paradox",
+            "философ", "philosoph", "дилемм", "dilemma",
+            # Introspection
+            "чувству", "feel", "думаешь", "think", "считаешь", "believe",
+            "представь", "imagine", "между нами", "between us"
+        ]
+        philosophical_matches = sum(1 for kw in PHILOSOPHICAL_KEYWORDS if kw in input_lower)
+        if philosophical_matches >= 2:
+            print(f"[OM] PHILOSOPHICAL OVERRIDE: Detected introspective question ({philosophical_matches} keywords) -> using FAST path (no search)")
+            return "philosophical", 0.90
+
+        # PHYSICS DETECTION: Physical/mechanical scenarios need expert simulation
+        PHYSICS_KEYWORDS = [
+            "физик", "фізик", "physics", "механик", "механік", "mechanics",
+            "gravity", "гравіт", "давлен", "тиск", "pressure",
+            "падает", "падає", "falls", "fall", "упадет",
+            "горит", "горить", "burns", "flame", "огонь", "вогонь",
+            "вакуум", "vacuum", "лестниц", "драбин", "ladder",
+            "температур", "temperature", "кипит", "кипить", "boil",
+            "высот", "висот", "altitude", "атмосфер", "atmosphere"
+        ]
+        physics_matches = sum(1 for kw in PHYSICS_KEYWORDS if kw in input_lower)
+        if physics_matches >= 1:
+            print(f"[OM] PHYSICS OVERRIDE: Detected physics scenario ({physics_matches} keywords) -> forcing DEEP path")
+            return "physics", 0.90
 
         CALC_KEYWORDS = [
             "calculate", "compute", "посчитай", "рассчитай", "math", 
@@ -247,15 +336,49 @@ class OperationalModule:
         Deep path  → experts + critic (complex, low confidence)
         """
         
-        # New: Check semantic rules first (Maximal approach)
+        # Check semantic rules first (pattern-driven routing)
+        user_input_lower = context.user_input.lower()
+        intent_lower = intent.lower()
+        
         for rule_trigger, target_depth in self.policy.semantic_rules.items():
-            if rule_trigger in intent.lower() or rule_trigger in context.user_input.lower():
+            trigger_lower = rule_trigger.lower()
+            
+            # Check for matches in intent or user input
+            # Supports both exact substring and word-by-word matching
+            trigger_words = trigger_lower.split('_')  # e.g., "complex_analytical" -> ["complex", "analytical"]
+            
+            matched = False
+            if trigger_lower in intent_lower:
+                matched = True
+            elif trigger_lower in user_input_lower:
+                matched = True
+            elif any(word in intent_lower for word in trigger_words if len(word) > 2):
+                matched = True
+            elif any(word in user_input_lower for word in trigger_words if len(word) > 2):
+                matched = True
+                
+            if matched:
                 try:
-                    # Map string depth to Enum
                     forced_depth = DecisionDepth(target_depth.lower())
+                    print(f"[OM] Semantic rule applied: '{rule_trigger}' -> {forced_depth.value}")
                     return forced_depth
                 except ValueError:
                     pass
+        
+        # ═══════════════════════════════════════════════════════════════
+        # NEW INTENTS: Force FAST/MEDIUM to prevent expert calls
+        # ═══════════════════════════════════════════════════════════════
+        NO_EXPERT_INTENTS = [
+            "self_reflection",      # Self-analysis questions
+            "internal_query",       # Omega architecture
+            "calculation_simple",   # Simple math like 178*24
+            "unknown_internal",     # Non-existent modules
+            "philosophical",        # Introspective/ethical questions
+            "analytical"            # Logic puzzles
+        ]
+        if intent in NO_EXPERT_INTENTS:
+            print(f"[OM] NO-EXPERT PATH: Intent '{intent}' -> FAST (pure LLM)")
+            return DecisionDepth.FAST
         
         # PRIORITY: Realtime data & Calculation ALWAYS requires DEEP path (tools)
         if intent in ["realtime_data", "calculation"]:
@@ -275,7 +398,7 @@ class OperationalModule:
         if confidence < self.policy.expert_call_threshold:
             return DecisionDepth.DEEP
         
-        if intent in ["complex", "analytical"]:
+        if intent == "complex":  # Removed "analytical" to allow reasoning via Medium path
             return DecisionDepth.DEEP
         
         # Low trust users get more scrutiny
@@ -288,12 +411,21 @@ class OperationalModule:
     async def _fast_response(self, context: ContextSlice) -> str:
         """Fast path: single LLM call (uses FastLLM if available)."""
         
+        # Inject date and self-identity
+        from datetime import datetime
+        # Inject date and simplified identity for FAST path (to avoid hallucinations in small models)
+        from datetime import datetime
+        # Simplified identity for phi3:mini
+        current_date_str = datetime.now().strftime("%d.%m.%Y")
+        system_msg = f"You are Omega, a helpful AI assistant. Today's date: {current_date_str}. Do not hallucinate."
+        
         prompt = context.user_input
         
         # Use fast LLM if router is available
         if hasattr(self.llm, 'generate_fast'):
             return await self.llm.generate_fast(
                 prompt=prompt,
+                system_prompt=system_msg,
                 temperature=0.7,
                 max_tokens=512  # Shorter for fast responses
             )
@@ -306,6 +438,13 @@ class OperationalModule:
     async def _medium_response(self, context: ContextSlice) -> str:
         """Medium path: LLM + memory context."""
         
+        # Inject date
+        from datetime import datetime
+        current_date_str = datetime.now().strftime("%d.%m.%Y")
+        
+        # Import self-identity
+        from core.ontology import SELF_IDENTITY
+        
         # Build context from recent events
         context_str = ""
         for event in context.recent_events[-5:]:
@@ -315,7 +454,8 @@ class OperationalModule:
         if context.long_term_context:
             context_str = context.long_term_context + "\n" + context_str
 
-        prompt = f"""Context:
+        prompt = f"""[TODAY'S DATE: {current_date_str}]
+Context:
 {context_str}
 
 Current goal: {context.active_goal or 'None'}
@@ -325,7 +465,8 @@ User message: {context.user_input}"""
         
         return await self.llm.generate(
             prompt=prompt,
-            system_prompt="You are a helpful assistant.",
+            # Add constraint to NOT output internal logs
+            system_prompt=f"{SELF_IDENTITY}\nYou are a helpful assistant. Do NOT output internal module logs (like 'OperationalModule:'). Check your response for naturalness.",
             temperature=0.6
         )
     
@@ -373,7 +514,8 @@ User message: {context.user_input}"""
         # Get critic analysis
         critic_analysis = await self.critic.analyze(
             expert_responses=expert_responses,
-            original_query=context.user_input
+            original_query=context.user_input,
+            intent=intent
         )
         
         # Select best response based on critic

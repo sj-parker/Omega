@@ -88,16 +88,25 @@ class LearningDecoder:
                 self.raw_traces.append(trace)
                 
                 # Create a basic summary from the loaded trace
+                confidence = trace.decision.get("confidence", 0.5)
+                # Determine outcome based on confidence
+                if confidence >= 0.7:
+                    outcome = "success"
+                elif confidence >= 0.4:
+                    outcome = "partial"
+                else:
+                    outcome = "failure"
+                
                 summary = EpisodeSummary(
                     episode_id=trace.episode_id,
                     summary=f"Loaded: {trace.user_input[:50]}...",
                     key_metrics={
-                        "confidence": trace.decision.get("confidence", 0.5),
+                        "confidence": confidence,
                         "cost_ms": trace.decision.get("cost", {}).get("time_ms", 0),
                         "experts_used": len(trace.expert_outputs),
                         "depth": trace.decision.get("depth_used", "unknown")
                     },
-                    outcome="partial"  # Default for loaded data
+                    outcome=outcome
                 )
                 self.summaries.append(summary)
                 loaded += 1
@@ -181,7 +190,13 @@ Response excerpt: {trace.final_response[:200]}..."""
         else:
             # Simple fallback
             summary_text = f"Query: {trace.user_input[:50]}... → {trace.decision.get('depth_used', 'fast')}"
-            outcome = "partial" if trace.decision.get('confidence', 0) < 0.6 else "success"
+            confidence = trace.decision.get('confidence', 0)
+            if confidence >= 0.7:
+                outcome = "success"
+            elif confidence >= 0.4:
+                outcome = "partial"
+            else:
+                outcome = "failure"
         
         summary = EpisodeSummary(
             episode_id=trace.episode_id,
@@ -198,6 +213,45 @@ Response excerpt: {trace.final_response[:200]}..."""
         self.summaries.append(summary)
         return summary
     
+    def _pattern_similarity(self, desc1: str, desc2: str) -> float:
+        """
+        Calculate simple similarity between two pattern descriptions.
+        Uses word overlap (Jaccard similarity).
+        """
+        words1 = set(desc1.lower().split())
+        words2 = set(desc2.lower().split())
+        
+        # Remove common stop words
+        stop_words = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'of', 'to', 'in', 'for', 
+                      'on', 'with', 'and', 'or', 'that', 'this', 'it', '-', '–', '—'}
+        words1 -= stop_words
+        words2 -= stop_words
+        
+        if not words1 or not words2:
+            return 0.0
+            
+        intersection = words1 & words2
+        union = words1 | words2
+        
+        return len(intersection) / len(union)
+    
+    def _find_similar_pattern(self, description: str, threshold: float = 0.6) -> Optional[ExtractedPattern]:
+        """
+        Find an existing pattern similar to the given description.
+        
+        Returns the most similar pattern if similarity > threshold.
+        """
+        best_match = None
+        best_score = 0.0
+        
+        for pattern in self.patterns:
+            score = self._pattern_similarity(description, pattern.description)
+            if score > best_score and score >= threshold:
+                best_score = score
+                best_match = pattern
+        
+        return best_match
+    
     def extract_pattern(
         self,
         episodes: list[EpisodeSummary],
@@ -206,13 +260,28 @@ Response excerpt: {trace.final_response[:200]}..."""
         """
         Extract a pattern from multiple episodes (Level 3).
         
-        Patterns are used by policy, not sent to LLM directly.
+        If a similar pattern already exists, increments its validation count
+        instead of creating a duplicate.
         """
+        # Check for similar existing pattern
+        existing = self._find_similar_pattern(description)
+        
+        if existing:
+            # Increment validation count and update confidence
+            existing.times_validated += 1
+            existing.confidence = min(0.95, existing.confidence + 0.05)
+            # Add new source episodes
+            for ep in episodes:
+                if ep.episode_id not in existing.source_episodes:
+                    existing.source_episodes.append(ep.episode_id)
+            return existing
+        
+        # Create new pattern
         pattern = ExtractedPattern(
             description=description,
             source_episodes=[e.episode_id for e in episodes],
             confidence=0.5,
-            times_validated=0
+            times_validated=1
         )
         
         self.patterns.append(pattern)

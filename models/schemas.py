@@ -76,7 +76,7 @@ class DecisionObject:
 @dataclass
 class PolicySpace:
     """Ограниченный набор 'рычагов' для гомеостаза."""
-    fast_path_bias: float = 0.65        # Preference for fast path
+    fast_path_bias: float = 0.75        # Preference for fast path (raised from 0.65)
     expert_call_threshold: float = 0.4  # Confidence below this -> call experts
     creative_range: tuple = (0.6, 0.9)  # Temperature range for creative expert
     memory_write_threshold: float = 0.3 # Only write to memory if importance > this

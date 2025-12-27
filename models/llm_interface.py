@@ -282,11 +282,11 @@ class OpenAILLM(LLMInterface):
 
 class FunctionGemmaLLM(LLMInterface):
     """
-    FunctionGemma - specialized tool-calling model.
-    Uses native Ollama tools=[] format.
+    ToolCaller - specialized tool-calling model.
+    Previously FunctionGemma, now using Qwen2.5:7b for better reasoning.
     """
     
-    def __init__(self, model: str = "functiongemma", base_url: str = "http://localhost:11434"):
+    def __init__(self, model: str = "qwen2.5:7b", base_url: str = "http://localhost:11434"):
         self.model = model
         self.base_url = base_url
         self._tools = []
@@ -299,55 +299,45 @@ class FunctionGemmaLLM(LLMInterface):
         self,
         prompt: str,
         system_prompt: Optional[str] = None,
-        temperature: float = 0.3,  # Lower temp for precise tool calls
+        temperature: float = 0.0,  # Zero temp for precise tool calls
         max_tokens: int = 512
     ) -> str:
         """Generate a tool call (or text response)."""
         import aiohttp
         
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
-        
+        # Qwen prefers explicit system prompts
+        if not system_prompt:
+            system_prompt = "You are a helpful assistant that outputs only JSON."
+            
         payload = {
             "model": self.model,
-            "messages": messages,
+            "prompt": prompt,
+            "system": system_prompt,
             "stream": False,
+            "temperature": temperature,
             "options": {
-                "temperature": temperature,
-                "num_predict": max_tokens
-            }
+                "num_predict": max_tokens,
+                "stop": ["<|endoftext|>", "<|im_end|>"]
+            },
+            "format": "json"  # Native JSON mode for Qwen
         }
         
-        # Add tools if defined
-        if self._tools:
-            payload["tools"] = self._tools
-        
         async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{self.base_url}/api/chat",
-                json=payload
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    msg = data.get("message", {})
-                    
-                    # Check for tool calls
-                    if msg.get("tool_calls"):
-                        tool_call = msg["tool_calls"][0]
-                        func = tool_call.get("function", {})
-                        # Return as JSON string
-                        import json
-                        return json.dumps({
-                            "tool": func.get("name"),
-                            "arguments": func.get("arguments", {})
-                        })
-                    
-                    return msg.get("content", "")
-                else:
-                    error_text = await resp.text()
-                    raise Exception(f"FunctionGemma error {resp.status}: {error_text}")
+            try:
+                # Use /api/generate instead of /api/chat for better raw control
+                async with session.post(f"{self.base_url}/api/generate", json=payload) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                        return result.get("response", "")
+                    else:
+                        error_text = await resp.text()
+                        print(f"Error calling {self.model}: {error_text}")
+                        return "{}"
+            except Exception as e:
+                print(f"Connection error to {self.model}: {e}")
+                return "{}"
+        
+
     
     async def call_tool(
         self,
@@ -359,8 +349,48 @@ class FunctionGemmaLLM(LLMInterface):
         High-level method: given a task, return the appropriate tool call.
         Returns dict with 'tool' and 'arguments', or None if no tool needed.
         """
+        # ═══════════════════════════════════════════════════════════════
+        # FIX 1: Filter invalid "None" queries from experts
+        # ═══════════════════════════════════════════════════════════════
+        if not task_description or task_description.lower().strip() in ["none", "none.", "n/a", ""]:
+            print(f"[FunctionGemma] BLOCKED: Invalid task description '{task_description}'")
+            return None
+        
+        # ═══════════════════════════════════════════════════════════════
+        # FIX 2: Direct math detection - bypass LLM entirely for simple math
+        # ═══════════════════════════════════════════════════════════════
+        import re
+        math_match = re.search(r"(\d+(?:\.\d+)?)\s*[\*\×x]\s*(\d+(?:\.\d+)?)", task_description)
+        if math_match:
+            # Simple multiplication - return calculate result directly
+            a, b = float(math_match.group(1)), float(math_match.group(2))
+            result = a * b
+            print(f"[FunctionGemma] MATH BYPASS: {a} × {b} = {result}")
+            # Return a pseudo-observation so experts can use it
+            return {"tool": "direct_calculation", "arguments": {"result": result, "expression": f"{a} × {b}"}}
+        
+        # ═══════════════════════════════════════════════════════════════
+        # FIX 3: Block impossible calculation requests
+        # ═══════════════════════════════════════════════════════════════
+        IMPOSSIBLE_CALC_PATTERNS = [
+            r"probability", r"вероятност", r"ймовірност",
+            r"correlation", r"корреляц", r"кореляц",
+            r"analyze", r"аналіз", r"анализ",
+            r"assess", r"оценить", r"оцінити"
+        ]
+        task_lower = task_description.lower()
+        if any(re.search(p, task_lower) for p in IMPOSSIBLE_CALC_PATTERNS):
+            if "calculate" in task_lower or "compute" in task_lower or "вычисл" in task_lower:
+                print(f"[FunctionGemma] BLOCKED: Impossible calculation request (probability/correlation/analyze)")
+                return None
+        
         # Cleanup: Experts improperly use snake_case
         task_description = task_description.replace("_", " ")
+        
+        # FIX: Strip "search" prefix that experts often add
+        import re
+        task_description = re.sub(r"^search\s+", "", task_description, flags=re.IGNORECASE)
+        task_description = re.sub(r"^find\s+", "", task_description, flags=re.IGNORECASE)
         
         # STRICT TOOL FILTERING (Code Surgery)
         # We explicitly restricting the tools available to the LLM based on keywords.
@@ -372,58 +402,45 @@ class FunctionGemmaLLM(LLMInterface):
         key_task = task_description.lower()
         
         
-        # 1. Search Intent (Prioritize over calc if ambiguous)
-        if any(w in key_task for w in ["search", "find", "limit", "price", "weather", "who", "what", "where", "verify", "check"]):
-             search_tools = [t for t in tools if t.get('function', {}).get('name') in ['search_and_extract', 'verify_fact']]
-             filtered_tools = search_tools
-             forced_instruction = "CONSTRAINT: You MUST use 'search_and_extract' or 'verify_fact'. Do NOT calculate."
-             print(f"[FunctionGemma] Strict Filter: Locked to {[t.get('function', {}).get('name') for t in filtered_tools]}")
-
-        # 2. Calculation Intent (Only if NOT search)
-        elif any(w in key_task for w in ["calculate", "compute", "drain", "charge", "linear"]):
+        # 1. Calculation Intent (Check FIRST to avoid "what" masking it)
+        if any(w in key_task for w in ["calculate", "compute", "drain", "charge", "linear", "rate"]):
              # Keep calculate AND search tools (Fallback mechanism for complex math/puzzles)
              filtered_tools = [t for t in tools if "calculate" in t['function']['name'] or "search" in t['function']['name']]
              forced_instruction = '\nCONSTRAINT: Use "calculate_*" tools ONLY for linear rates. For puzzles, probability, or complex math, use "search_and_extract".'
-             print(f"[FunctionGemma] Strict Filter: Locked to {[t['function']['name'] for t in filtered_tools]}")
+             print(f"[QwenTool] Strict Filter: Intent=CALCULATION. Tools: {[t['function']['name'] for t in filtered_tools]}")
+
+        # 2. Search Intent (Only if NOT calculation)
+        elif any(w in key_task for w in ["search", "find", "limit", "price", "weather", "verify", "check", "news", "current"]):
+             search_tools = [t for t in tools if t.get('function', {}).get('name') in ['search_and_extract', 'verify_fact']]
+             filtered_tools = search_tools
+             forced_instruction = "CONSTRAINT: You MUST use 'search_and_extract' or 'verify_fact'. Do NOT calculate."
+             print(f"[QwenTool] Strict Filter: Intent=SEARCH. Tools: {[t.get('function', {}).get('name') for t in filtered_tools]}")
              
 
         self.set_tools(filtered_tools)
         
-        # Enhanced prompt with clear tool selection guidance
-        prompt = f"""You are a tool dispatcher. Given a task, select the correct tool and provide arguments.
-
-CRITICAL RULES:
-1. For CURRENT/REAL-TIME data (prices, weather, news, exchange rates) -> ALWAYS use "search_and_extract"
-2. For mathematical calculations (linear change, projections) -> use "calculate_linear_change"
-3. For resource allocation -> use "calculate_resource_allocation"
-4. For fact verification -> use "verify_fact"
+        # Enhanced prompt for Qwen: Provide tools definition and ask for JSON
+        tools_def = [t.get('function') for t in filtered_tools]
+        import json
+        
+        prompt = f"""You are a tool calling assistant. Given a task, select the best tool and providing arguments in JSON format.
 
 Task: {task_description}
 
-Available tools: {[t.get('function', {}).get('name') for t in filtered_tools]}
+Available Tools:
+{json.dumps(tools_def, indent=2)}
 
 {f"Context: {context}" if context else ""}
 
-IMPORTANT RULES FOR search_and_extract:
-- The "query" should be a CLEAN, SIMPLE search phrase matching the task.
-- "target" is optional (use if specific data needed).
-- DO NOT use search_and_extract for calculations!
-
-IMPORTANT RULES FOR calculate_linear_change:
-- Use this tool if the task involves "calculate", "compute", "drain", "charge", "rate".
-- Do NOT search for how to calculate. Use the tool directly.
-- PRESERVE PRECISION: Do NOT round numbers. Use 83.4, not 83.
-- PERCENTAGES: "2% per minute" means rate = -2 (minus 2 units), NOT -0.02.
-
-EXAMPLES:
-Task: "Check weather in London" -> {{"tool": "search_and_extract", "arguments": {{"query": "current weather London", "target": "weather"}}}}
-Task: "Apple stock price" -> {{"tool": "search_and_extract", "arguments": {{"query": "current Apple stock price", "target": "price"}}}}
-Task: "Calculate battery drain from 83.4% with -1.4 rate" -> {{"tool": "calculate_linear_change", "arguments": {{"start": 83.4, "rate": -1.4, "time": 10, "variable_name": "final_charge"}}}}
-Task: "calculate_linear_change for battery..." -> {{"tool": "calculate_linear_change", ...}}
+IMPORTANT RULES:
+1. Return ONLY the JSON object.
+2. For current data (weather, prices) use "search_and_extract".
+3. For calculations use "calculate_linear_change" ONLY if applicable.
+4. If no tool fits, return {{"tool": "none", "arguments": {{}}}}
 
 {forced_instruction}
 
-Output ONLY valid JSON: {{"tool": "tool_name", "arguments": {{...}}}}"""
+Respond with JSON ONLY:"""
 
         response = await self.generate(prompt, temperature=0.0)
 
@@ -455,14 +472,20 @@ Output ONLY valid JSON: {{"tool": "tool_name", "arguments": {{...}}}}"""
                 task_is_about_weather = any(w in task_lower for w in WEATHER_KEYWORDS)
                 task_is_about_stocks = any(w in task_lower for w in STOCK_KEYWORDS)
                 
-                # Semantic relevance check: query should share at least one meaningful word with task
-                task_words = set(w for w in task_lower.split() if len(w) > 3)
-                query_words = set(w for w in query.split() if len(w) > 3)
+                # IMPROVED Semantic relevance check
+                # Extract meaningful words (>3 chars, not common stopwords)
+                STOPWORDS = {"the", "and", "for", "that", "this", "with", "from", "search", "find", "about"}
+                task_words = set(w for w in task_lower.split() if len(w) > 3 and w not in STOPWORDS)
+                query_words = set(w for w in query.split() if len(w) > 3 and w not in STOPWORDS)
                 shared_words = task_words & query_words
                 
-                is_semantically_irrelevant = len(shared_words) == 0 and len(task_words) > 2
+                # Must have NO shared words AND task must have enough context to compare
+                is_semantically_irrelevant = len(shared_words) == 0 and len(task_words) > 3
                 
-                if (is_known_hallucination and not task_is_about_weather and not task_is_about_stocks) or is_semantically_irrelevant:
+                # FIX: Don't flag as hallucination if query is clearly derived from task
+                query_in_task = query in task_lower or task_lower in query
+                
+                if (is_known_hallucination and not task_is_about_weather and not task_is_about_stocks) and not query_in_task:
                     print(f"[FunctionGemma] HALLUCINATION DETECTED: '{query[:50]}' unrelated to '{task_description[:50]}'")
                     # Fallback: use task description as query
                     return {"tool": "search_and_extract", "arguments": {"query": task_description}}

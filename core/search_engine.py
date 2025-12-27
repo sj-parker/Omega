@@ -1,7 +1,7 @@
 # Omega Search Engine
 # Interface to DuckDuckGo for real-time web search
 
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 from dataclasses import dataclass
 from typing import List, Optional
 import re

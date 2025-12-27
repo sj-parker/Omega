@@ -87,9 +87,11 @@ async def test_pattern_impact():
     print("Verifying OperationalModule behavior...")
     
     # A query that matches the rule "complex"
+    from models.schemas import WorldState
     context = ContextSlice(
         user_input="Explain complex quantum physics",
-        user_identity=UserIdentity(user_id="test", trust_level=1.0)
+        user_identity=UserIdentity(user_id="test", trust_level=1.0),
+        world_state=WorldState()
     )
     
     # We need to simulate intent classification since MockLLM is generic

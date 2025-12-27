@@ -1,7 +1,9 @@
 # Homeostasis Controller
 # Maintains system stability through policy calibration
 
+import json
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import sys
@@ -31,9 +33,14 @@ class HomeostasisController:
     Homeostasis is about stability, not precision.
     """
     
-    def __init__(self, policy: PolicySpace):
+    def __init__(self, policy: PolicySpace, storage_path: Optional[Path] = None):
         self.policy = policy
         self.update_history: list[PolicyUpdate] = []
+        self.storage_path = storage_path or Path("./learning_data")
+        self.storage_path.mkdir(parents=True, exist_ok=True)
+        
+        # Try to load saved policy on startup
+        self.load_policy()
         
         # Target ranges (safe, not "correct")
         self.targets = {
@@ -105,8 +112,9 @@ class HomeostasisController:
         return policy_update
     
     def apply_update(self, update: PolicyUpdate):
-        """Apply a policy update."""
+        """Apply a policy update and auto-save."""
         self.policy.apply_update(update.updates)
+        self.save_policy()  # Auto-save after each update
     
     def get_current_metrics(self) -> HomeostasisMetrics:
         """Get current target metrics (for monitoring)."""
@@ -141,3 +149,50 @@ class HomeostasisController:
                 report["status"] = "warning"
         
         return report
+    
+    def save_policy(self):
+        """
+        Save current policy to disk for persistence across restarts.
+        """
+        policy_file = self.storage_path / "policy.json"
+        try:
+            data = {
+                "fast_path_bias": self.policy.fast_path_bias,
+                "expert_call_threshold": self.policy.expert_call_threshold,
+                "creative_range": list(self.policy.creative_range),
+                "memory_write_threshold": self.policy.memory_write_threshold,
+                "semantic_rules": self.policy.semantic_rules,
+                "saved_at": datetime.now().isoformat()
+            }
+            with open(policy_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[Homeostasis] Error saving policy: {e}")
+    
+    def load_policy(self):
+        """
+        Load saved policy from disk.
+        """
+        policy_file = self.storage_path / "policy.json"
+        if not policy_file.exists():
+            return
+        
+        try:
+            with open(policy_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # Apply saved values to policy
+            if "fast_path_bias" in data:
+                self.policy.fast_path_bias = data["fast_path_bias"]
+            if "expert_call_threshold" in data:
+                self.policy.expert_call_threshold = data["expert_call_threshold"]
+            if "memory_write_threshold" in data:
+                self.policy.memory_write_threshold = data["memory_write_threshold"]
+            if "semantic_rules" in data:
+                self.policy.semantic_rules = data["semantic_rules"]
+            if "creative_range" in data and len(data["creative_range"]) == 2:
+                self.policy.creative_range = tuple(data["creative_range"])
+            
+            print(f"[Homeostasis] Loaded policy from {policy_file}")
+        except Exception as e:
+            print(f"[Homeostasis] Error loading policy: {e}")
