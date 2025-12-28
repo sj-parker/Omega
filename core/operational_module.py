@@ -1,8 +1,9 @@
 # Operational Module (OM)
 # Central decision-making module with Decision Depth Controller
+# Refactored with InfoBroker and FallbackGenerator support
 
 from datetime import datetime
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 import time
 
 import sys
@@ -16,6 +17,12 @@ from models.llm_interface import LLMInterface
 from core.experts import ExpertsModule, CriticModule
 from core.validator import SemanticValidator
 from core.ontology import is_internal_query, entity_exists, extract_entity_name, should_block_search, get_ontology_response
+
+if TYPE_CHECKING:
+    from core.info_broker import InfoBroker
+    from core.sanitizer import ResponseSanitizer
+    from core.fallback_generator import FallbackGenerator
+    from core.task_decomposer import TaskDecomposer
 
 
 # Intent classification prompts
@@ -57,13 +64,39 @@ class OperationalModule:
         self,
         llm: LLMInterface,
         policy: Optional[PolicySpace] = None,
-        tool_caller: Optional[LLMInterface] = None
+        tool_caller: Optional[LLMInterface] = None,
+        # NEW: Modular components
+        info_broker: Optional['InfoBroker'] = None,
+        sanitizer: Optional['ResponseSanitizer'] = None,
+        fallback_generator: Optional['FallbackGenerator'] = None
     ):
         self.llm = llm
         self.policy = policy or PolicySpace()
         self.experts = ExpertsModule(llm, self.policy, tool_caller)
         self.critic = CriticModule(llm)
         self.validator = SemanticValidator(llm)
+        
+        # NEW: Store modular components
+        self.info_broker = info_broker
+        self.sanitizer = sanitizer
+        self.fallback_generator = fallback_generator
+        
+        # NEW: Task Decomposer for complex multi-step problems
+        from core.task_decomposer import TaskDecomposer
+        self.task_decomposer = TaskDecomposer(llm)
+        
+        # NEW: Simulation Engine for deterministic calculations
+        from core.simulation_engine import SimulationEngine
+        self.simulation_engine = SimulationEngine()
+        
+        # Expose search_engine for InfoBroker setup
+        if hasattr(self.experts, 'llm'):
+            from core.search_engine import SearchEngine
+            self.search_engine = SearchEngine()
+        
+        # Initialize Intent Router
+        from core.intent_router import IntentRouter
+        self.intent_router = IntentRouter(llm)
     
     async def process(
         self,
@@ -81,7 +114,7 @@ class OperationalModule:
         start_time = time.time()
         
         # Step 1: Classify intent and determine depth
-        intent, confidence = await self._classify_intent(context_slice.user_input)
+        intent, confidence = await self.intent_router.classify(context_slice.user_input)
         depth = self._decide_depth(intent, confidence, context_slice)
         
         # Step 1.5: Handle recall intent (RAG)
@@ -89,8 +122,52 @@ class OperationalModule:
             relevant_facts = context_manager.get_context_for_recall(context_slice.user_input)
             context_slice.long_term_context = relevant_facts
             print(f"[OM] Recall triggered. Long-term context added.")
+        
+        # Step 1.6: Task Decomposition for complex problems (NEW)
+        decomposed_problem = None
+        structured_context = ""
+        simulation_result = None
+        
+        if self.task_decomposer.is_complex_problem(context_slice.user_input):
+            decomposed_problem = self.task_decomposer.decompose(context_slice.user_input)
+            structured_context = self.task_decomposer.get_structured_prompt(decomposed_problem)
+            print(f"[OM] Complex problem detected:")
+            print(f"     - Entities: {decomposed_problem.entities}")
+            print(f"     - Given facts: {list(decomposed_problem.given_facts.keys())}")
+            print(f"     - Missing data (DO NOT INVENT): {decomposed_problem.missing_facts}")
+            print(f"     - Subtasks: {len(decomposed_problem.subtasks)}")
             
-        # Step 1.6: Generate internal thoughts for complex tasks
+            # Inject structured context to prevent hallucination
+            context_slice.long_term_context = structured_context + "\n\n" + (context_slice.long_term_context or "")
+            
+            # Force DEEP path for complex problems
+            if depth != DecisionDepth.DEEP:
+                print(f"[OM] Escalating to DEEP for complex problem")
+                depth = DecisionDepth.DEEP
+        
+        # Step 1.6b: Try deterministic simulation (FSM) for robot/resource problems
+        from core.simulation_engine import SimulationType
+        sim_type = self.simulation_engine.detect_simulation_type(context_slice.user_input)
+        
+        if sim_type == SimulationType.FSM:
+            print(f"[OM] FSM Simulation detected - using deterministic solver")
+            scenario = self.simulation_engine.parse_robot_scenario(context_slice.user_input)
+            
+            if scenario.get("entities") and scenario.get("tasks"):
+                simulation_result = self.simulation_engine.run_robot_simulation(scenario)
+                
+                if simulation_result.success:
+                    print(f"[OM] Simulation SUCCESS: {simulation_result.final_values}")
+                    # Inject simulation result into context
+                    context_slice.long_term_context = f"""
+## DETERMINISTIC SIMULATION RESULT (use these EXACT values):
+{simulation_result.answer_text}
+
+{context_slice.long_term_context or ""}"""
+                else:
+                    print(f"[OM] Simulation: {simulation_result.error}")
+            
+        # Step 1.7: Generate internal thoughts for complex tasks
         thoughts = ""
         if depth == DecisionDepth.DEEP:
             thoughts = await self._generate_thoughts(context_slice)
@@ -136,6 +213,17 @@ class OperationalModule:
         else:  # DEEP
             # Deep path: experts + critic
             response, expert_outputs, critic_output = await self._deep_response(context_slice, thoughts)
+        
+        # Step 2.6: Handle insufficient information (NEW)
+        if self._is_response_insufficient(response, confidence) and self.fallback_generator:
+            from core.fallback_generator import UncertaintyLevel
+            level = UncertaintyLevel.HIGH if confidence < 0.3 else UncertaintyLevel.MEDIUM
+            fallback = self.fallback_generator.admit_uncertainty(
+                topic=context_slice.user_input[:50],
+                level=level
+            )
+            print(f"[OM] FallbackGenerator activated: {level.value}")
+            response = fallback.text
             
         # Step 2.5: Apply State Updates from Experts
         if expert_outputs:
@@ -187,139 +275,8 @@ class OperationalModule:
         return response, decision, trace
     
     async def _classify_intent(self, user_input: str) -> tuple[str, float]:
-        """Classify user intent and estimate confidence."""
-        
-        # ═══════════════════════════════════════════════════════════════
-        # ONTOLOGY GATE: Block fabrication of non-existent internal modules
-        # ═══════════════════════════════════════════════════════════════
-        input_lower = user_input.lower()
-        
-        # Check if query is about internal Omega architecture
-        if is_internal_query(user_input):
-            entity_name = extract_entity_name(user_input)
-            if entity_name and not entity_exists(entity_name):
-                print(f"[OM] ONTOLOGY GATE: Entity '{entity_name}' not found in registry -> blocking fabrication")
-                return "unknown_internal", 0.99  # High confidence refusal
-            print(f"[OM] ONTOLOGY GATE: Valid internal query about '{entity_name or 'Omega'}'")
-        
-        # Check if search should be blocked
-        block_search, reason = should_block_search(user_input)
-        if block_search:
-            print(f"[OM] SEARCH BLOCKED: Reason='{reason}' -> forcing MEDIUM path (no tools)")
-            if reason == "math_expression":
-                return "calculation_simple", 0.95  # Simple math, no tools needed
-            elif reason == "self_analysis":
-                return "self_reflection", 0.90  # Internal reflection, no search
-            else:
-                return "internal_query", 0.90  # Architecture query, no search
-        
-        # ═══════════════════════════════════════════════════════════════
-        # PRE-LLM KEYWORD CHECK: Force realtime_data for known data queries
-        # ═══════════════════════════════════════════════════════════════
-        REALTIME_KEYWORDS = [
-            "bitcoin", "btc", "ethereum", "crypto", "price", "цена", "стоит", 
-            "курс", "погода", "weather", "stock", "акци", "exchange rate",
-            "сегодня стоит", "текущ", "актуальн", "current", "live", "real-time"
-        ]
-        # Require 2+ keyword matches to prevent false positives (e.g. "текущий статус")
-        realtime_matches = sum(1 for kw in REALTIME_KEYWORDS if kw in input_lower)
-        if realtime_matches >= 2:
-            print(f"[OM] KEYWORD OVERRIDE: Detected realtime data request ({realtime_matches} keywords) -> forcing DEEP path")
-            return "realtime_data", 0.95
-
-        # REASONING/LOGIC PUZZLES: These should be solved by thinking, not searching
-        REASONING_KEYWORDS = [
-            # Math word problems
-            "сколько", "скільки", "how many", "how much", "посчитай", "порахуй",
-            "в два раза", "в три раза", "больше чем", "менше ніж", "більше ніж",
-            # Logic puzzles
-            "лишний", "лишнее", "зайвий", "odd one out", "какой не подходит",
-            "что произойдет", "що станеться", "what will happen", "what happens",
-            # Physical reasoning
-            "распилили", "розпиляли", "покрасили", "пофарбували", "разрезали",
-            "грани", "грані", "кубик", "куб",
-            # Riddles
-            "загадка", "riddle", "головоломка", "puzzle",
-            # Comparisons that need logic
-            "физическ", "фізичн", "механическ", "зеркальн", "дзеркальн",
-            # Date/time awareness (system knows the date)
-            "какой сегодня", "який сьогодні", "what day", "what date", "сегодня день"
-        ]
-        reasoning_matches = sum(1 for kw in REASONING_KEYWORDS if kw in input_lower)
-        # Require 2+ matches to avoid false positives like "честнее" triggering
-        if reasoning_matches >= 2:
-            print(f"[OM] REASONING OVERRIDE: Detected logic puzzle ({reasoning_matches} keywords) -> using MEDIUM path for pure reasoning")
-            return "analytical", 0.85  # MEDIUM path - will use LLM reasoning without tools
-
-        # PHILOSOPHICAL/INTROSPECTIVE: These should use internal knowledge, NOT search
-        PHILOSOPHICAL_KEYWORDS = [
-            # Self-reflection
-            "честн", "honest", "правд", "truth", "ограничен", "limitation",
-            "сомнен", "doubt", "уверен", "confiden", "ошиб", "mistake", "error",
-            # Ethics/philosophy  
-            "этик", "ethic", "мораль", "moral", "парадокс", "paradox",
-            "философ", "philosoph", "дилемм", "dilemma",
-            # Introspection
-            "чувству", "feel", "думаешь", "think", "считаешь", "believe",
-            "представь", "imagine", "между нами", "between us"
-        ]
-        philosophical_matches = sum(1 for kw in PHILOSOPHICAL_KEYWORDS if kw in input_lower)
-        if philosophical_matches >= 2:
-            print(f"[OM] PHILOSOPHICAL OVERRIDE: Detected introspective question ({philosophical_matches} keywords) -> using FAST path (no search)")
-            return "philosophical", 0.90
-
-        # PHYSICS DETECTION: Physical/mechanical scenarios need expert simulation
-        PHYSICS_KEYWORDS = [
-            "физик", "фізик", "physics", "механик", "механік", "mechanics",
-            "gravity", "гравіт", "давлен", "тиск", "pressure",
-            "падает", "падає", "falls", "fall", "упадет",
-            "горит", "горить", "burns", "flame", "огонь", "вогонь",
-            "вакуум", "vacuum", "лестниц", "драбин", "ladder",
-            "температур", "temperature", "кипит", "кипить", "boil",
-            "высот", "висот", "altitude", "атмосфер", "atmosphere"
-        ]
-        physics_matches = sum(1 for kw in PHYSICS_KEYWORDS if kw in input_lower)
-        if physics_matches >= 1:
-            print(f"[OM] PHYSICS OVERRIDE: Detected physics scenario ({physics_matches} keywords) -> forcing DEEP path")
-            return "physics", 0.90
-
-        CALC_KEYWORDS = [
-            "calculate", "compute", "посчитай", "рассчитай", "math", 
-            "linear change", "rate=", "start=", "equation"
-        ]
-        if any(kw in input_lower for kw in CALC_KEYWORDS):
-             print(f"[OM] KEYWORD OVERRIDE: Detected calculation request -> forcing DEEP path")
-             return "calculation", 0.95
-        
-        # Use generate_fast if available to speed up intent classification
-        if hasattr(self.llm, 'generate_fast'):
-            response = await self.llm.generate_fast(
-                prompt=f"User message: {user_input}",
-                system_prompt=INTENT_CLASSIFIER_PROMPT,
-                temperature=0.2
-            )
-        else:
-            response = await self.llm.generate(
-                prompt=f"User message: {user_input}",
-                system_prompt=INTENT_CLASSIFIER_PROMPT,
-                temperature=0.2
-            )
-        
-        # Parse response
-        intent = "factual"  # default
-        confidence = 0.5
-        
-        lines = response.split('\n')
-        for line in lines:
-            if line.startswith("INTENT:"):
-                intent = line.split(":", 1)[1].strip().lower()
-            elif line.startswith("CONFIDENCE:"):
-                try:
-                    confidence = float(line.split(":", 1)[1].strip())
-                except:
-                    pass
-        
-        return intent, confidence
+        """Classify user intent (Delegated to IntentRouter)."""
+        return await self.intent_router.classify(user_input)
 
     
     def _decide_depth(
@@ -501,9 +458,9 @@ User message: {context.user_input}"""
         intent, _ = await self._classify_intent(context.user_input)
         if intent == "realtime_data":
              import re
-             # Remove "Result: X" and "Formula: Y" lines to prevent context contamination
-             context_str = re.sub(r"(Result:|Formula:).*", "", context_str)
-             print(f"[OM] Context Purge Active: Scrubbed calculation artifacts for Search task.")
+             # Remove "Result: X" and "Formula: Y" AND old "[OBSERVATION]" lines to prevent context contamination
+             context_str = re.sub(r"(Result:|Formula:|\[OBSERVATION\]).*?(\n|$)", "", context_str)
+             print(f"[OM] Context Purge Active: Scrubbed calculation artifacts and old observations for Search task.")
         
         # Consult all experts
         expert_responses = await self.experts.consult_all(
@@ -584,3 +541,40 @@ Output: Your internal thoughts (1-2 sentences)."""
         self.policy.apply_update(updates)
         # Update experts with new policy
         self.experts.policy = self.policy
+    
+    def _is_response_insufficient(self, response: str, confidence: float) -> bool:
+        """
+        Check if the response is insufficient and should use fallback.
+        
+        Criteria:
+        - Empty or very short response
+        - Contains "not found" indicators
+        - Low confidence with vague response
+        - Response is just repeating the question
+        """
+        if not response or len(response.strip()) < 10:
+            return True
+        
+        response_lower = response.lower()
+        
+        # Indicators of failed search / no information
+        NO_INFO_PATTERNS = [
+            "не удалось найти",
+            "no information found",
+            "i couldn't find",
+            "i don't have",
+            "no data available",
+            "unable to find",
+            "нет данных",
+            "информация недоступна",
+        ]
+        
+        for pattern in NO_INFO_PATTERNS:
+            if pattern in response_lower:
+                return True
+        
+        # Low confidence + short response = likely insufficient
+        if confidence < 0.4 and len(response) < 100:
+            return True
+        
+        return False

@@ -1,5 +1,6 @@
 # Main Entry Point
 # CLI interface for the Cognitive LLM System
+# Refactored with Orchestrator, InfoBroker, and Safety Layer
 
 import asyncio
 from pathlib import Path
@@ -17,6 +18,12 @@ from learning.learning_decoder import LearningDecoder
 from learning.homeostasis import HomeostasisController
 from learning.reflection import ReflectionController
 from core.config import config
+
+# NEW: Modular Architecture Components
+from core.orchestrator import Orchestrator, ModuleInterface, ModuleCapability
+from core.info_broker import InfoBroker
+from core.sanitizer import ResponseSanitizer
+from core.fallback_generator import FallbackGenerator, UncertaintyLevel
 
 
 class CognitiveSystem:
@@ -78,7 +85,38 @@ class CognitiveSystem:
         self.history_store = UserHistoryStore()
         self.gatekeeper = Gatekeeper(self.history_store)
         self.context_manager = ContextManager()
-        self.om = OperationalModule(self.llm, self.policy)
+        
+        # NEW: Initialize Orchestrator
+        self.orchestrator = Orchestrator(default_timeout=30.0)
+        
+        # NEW: Initialize Safety Layer
+        self.sanitizer = ResponseSanitizer(strict_mode=True)
+        self.fallback_generator = FallbackGenerator(default_language="ru")
+        
+        # NEW: Initialize InfoBroker (will be fully configured after OM creation)
+        self.info_broker = InfoBroker(
+            context_manager=self.context_manager,
+            search_engine=None,  # Will be set from OM
+            experts=None         # Will be set after OM creation
+        )
+        
+        # Create OperationalModule with new components
+        self.om = OperationalModule(
+            self.llm,
+            self.policy,
+            info_broker=self.info_broker,
+            sanitizer=self.sanitizer,
+            fallback_generator=self.fallback_generator
+        )
+        
+        # Complete InfoBroker setup
+        if hasattr(self.om, 'experts'):
+            self.info_broker.experts = self.om.experts
+        if hasattr(self.om, 'search_engine'):
+            self.info_broker.search_engine = self.om.search_engine
+        
+        # Register modules in Orchestrator
+        asyncio.create_task(self._register_modules())
         
         # Learning Decoder and Reflection use quality_llm (main model)
         self.learning_decoder = LearningDecoder(llm=self.quality_llm)
@@ -119,6 +157,12 @@ class CognitiveSystem:
         
         # Step 4.1: Persist updated world state
         self.world_states[user_id] = context_slice.world_state
+        
+        # Step 4.2: Apply Response Sanitizer (NEW)
+        sanitization = self.sanitizer.sanitize(response, context=message)
+        if sanitization.was_modified:
+            print(f"[Sanitizer] Redacted {sanitization.redactions_count} items: {sanitization.redaction_types}")
+            response = sanitization.sanitized_text
         
         # Step 5: Record response
         self.context_manager.record_system_response(response)
@@ -198,6 +242,57 @@ FACTS:
             # ShortContextStore uses deque(maxlen=20) so it's already bounded.
         except Exception as e:
             print(f"[Memory] Compaction error: {e}")
+    
+    async def _register_modules(self):
+        """Register all modules in the Orchestrator."""
+        try:
+            # Register OperationalModule
+            await self.orchestrator.register_module(
+                name="operational_module",
+                module=self.om,
+                interface=ModuleInterface(
+                    name="operational_module",
+                    input_types=["user_query", "context_slice"],
+                    output_types=["response", "decision", "trace"],
+                    capabilities=[ModuleCapability.REASON, ModuleCapability.GENERATE],
+                    priority=100
+                )
+            )
+            
+            # Register ContextManager
+            await self.orchestrator.register_module(
+                name="context_manager",
+                module=self.context_manager,
+                interface=ModuleInterface(
+                    name="context_manager",
+                    input_types=["user_input", "fact"],
+                    output_types=["context_slice", "facts"],
+                    capabilities=[ModuleCapability.REMEMBER],
+                    priority=90
+                )
+            )
+            
+            # Register Gatekeeper
+            await self.orchestrator.register_module(
+                name="gatekeeper",
+                module=self.gatekeeper,
+                interface=ModuleInterface(
+                    name="gatekeeper",
+                    input_types=["user_message"],
+                    output_types=["identity"],
+                    capabilities=[ModuleCapability.VALIDATE],
+                    priority=95,
+                    is_async=False
+                )
+            )
+            
+            print(f"[Orchestrator] Registered {len(self.orchestrator.get_all_modules())} modules")
+        except Exception as e:
+            print(f"[Orchestrator] Registration error: {e}")
+    
+    def get_orchestrator_health(self) -> dict:
+        """Get Orchestrator health report."""
+        return self.orchestrator.health_report()
 
 
 async def interactive_cli():

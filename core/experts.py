@@ -153,15 +153,21 @@ class ExpertsModule:
         system_prompt = EXPERT_PROMPTS.get(expert_type, EXPERT_PROMPTS["neutral"])
         
         # DYNAMIC DATE INJECTION: Tell the model what today's date is
+        # DYNAMIC DATE INJECTION: Tell the model what today's date is
         from datetime import datetime
         current_date = datetime.now().strftime("%d.%m.%Y")
         system_prompt = f"""[TODAY'S DATE: {current_date}]
 When searching for current data, always use this date as 'today'.
 
 🛡️ CONTEXT ISOLATION:
-Focus ONLY on the current user request.
-Ignore previous topics (e.g., past dates or events) unless they are directly related.
-Do NOT hallucinate connections between unrelated queries.
+1. Focus ONLY on the current user request.
+2. IGNORE previous [OBSERVATION] lines if they are from past turns (look at the conversation history).
+3. Do NOT hallucinate connections between unrelated queries.
+
+🌍 LANGUAGE RULE:
+- If the user writes in RUSSIAN, you MUST respond in RUSSIAN.
+- If the user writes in ENGLISH, you MUST respond in ENGLISH.
+- Translate tool outputs (like weather descriptions) into the user's language.
 
 """ + system_prompt
         
@@ -258,6 +264,28 @@ Try again properly.
                         history.append("[SYSTEM]: This query was already made. Please analyze existing observations or try a different approach.")
                         continue
                     recent_tool_queries.append(task_desc)
+                    
+                    # ========================================
+                    # LOGIC PROBLEM GATE: Block search for analytical/logic tasks
+                    # ========================================
+                    from core.ontology import should_block_search
+                    
+                    # Check if this is a search request for a logical problem
+                    is_search_request = "search" in task_desc.lower()
+                    block_reason = should_block_search(prompt)  # Check original query
+                    
+                    if is_search_request and block_reason:
+                        print(f"[Experts] LOGIC GATE: Search blocked for logical problem (reason: {block_reason})")
+                        observation = f"""
+[SYSTEM]: Search BLOCKED. This is a LOGICAL/ANALYTICAL problem that should be solved with REASONING, not search.
+Reason: {block_reason}
+
+You have ALL the data you need in the problem statement. 
+Solve it step by step using the given rules and constraints.
+DO NOT search for external information - use ONLY the provided data.
+If any data is missing (like base price), express the answer as a FORMULA, not a number."""
+                        history.append(observation)
+                        continue
                     
                     print(f"[Experts] Delegating to FunctionGemma: {task_desc}")
                     

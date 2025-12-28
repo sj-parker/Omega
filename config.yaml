@@ -1,7 +1,7 @@
 # Models configuration gemma3:latest or gemma3n:e2b
 models:
   main: "gemma3:latest"
-  fast: "phi3:mini"
+  fast: "gemma3:1b"
   use_ollama: true
   use_multi_model: true
 

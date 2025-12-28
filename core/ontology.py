@@ -68,7 +68,38 @@ SEARCH_BLOCKED_PATTERNS = [
     # Internal architecture (when combined with omega-like words)
     r"omega.*модуль", r"модуль.*omega", r"omega.*компонент",
     r"omega.*архитектур", r"архитектур.*omega",
-    r"опиши.*omega", r"omega.*описа", r"explain.*omega"
+    r"опиши.*omega", r"omega.*описа", r"explain.*omega",
+    
+    # ========================================
+    # LOGICAL/ANALYTICAL PROBLEMS - NO SEARCH
+    # ========================================
+    # Problems with explicit rules and priorities should use REASONING not search
+    
+    # Priority/queue problems (like EV charging)
+    r"(?:правило|rule).*(?:приоритет|priority)",
+    r"(?:приоритет|priority).*(?:очередь|queue|order)",
+    r"(?:исключение|exception).*(?:бесплатн|free)",
+    r"(?:скидк|discount).*(?:если|if|only)",
+    
+    # Multi-entity allocation with constraints
+    r"(?:порт|port|slot).*(?:всего|only|limited)\s*\d+",
+    r"\d+\s*(?:свободн|free|available).*(?:порт|port|slot)",
+    
+    # Conditional rules with percentages
+    r"(?:ниже|below|less)\s*\d+\s*%",
+    r"(?:выше|above|more)\s*\d+\s*%",
+    
+    # Time-based pricing (like peak hours)
+    r"(?:час|hour).*(?:пик|peak).*(?:цена|price|cost)",
+    r"(?:удваивается|double|multiplier)",
+    
+    # Decision/priority problems
+    r"(?:кого|who).*(?:первый|first|заряжа|charg)",
+    r"(?:очередь|queue|order).*(?:обоснуй|justify|explain)",
+    
+    # Logic puzzles with given data
+    r"(?:одновременно|simultaneously).*(?:приехал|arriv)",
+    r"(?:на\s+станц|at\s+station).*(?:порт|port)",
 ]
 
 
