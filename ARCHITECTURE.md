@@ -6,197 +6,317 @@
 ## 🏗️ System Overview
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           OMEGA SYSTEM                                  │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  User Input                                                             │
-│      │                                                                  │
-│      ▼                                                                  │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                 │
-│  │ Gatekeeper  │───▶│  Context    │───▶│ Operational │                 │
-│  │ (Security)  │    │  Manager    │    │   Module    │                 │
-│  └─────────────┘    └─────────────┘    └──────┬──────┘                 │
-│                                               │                         │
-│              ┌────────────────────────────────┼────────────────┐        │
-│              │                                │                │        │
-│              ▼                                ▼                ▼        │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐         │
-│  │ TaskDecomposer  │  │ SimulationEngine│  │ ExpertsModule   │         │
-│  │ (Parse problem) │  │ (Deterministic) │  │ (LLM reasoning) │         │
-│  └─────────────────┘  └─────────────────┘  └─────────────────┘         │
-│              │                                │                         │
-│              └────────────────┬───────────────┘                         │
-│                               ▼                                         │
-│                      ┌─────────────────┐                                │
-│                      │   Sanitizer     │                                │
-│                      │ (Anti-leakage)  │                                │
-│                      └────────┬────────┘                                │
-│                               ▼                                         │
-│                          Response                                       │
-└─────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              OMEGA SYSTEM                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  User Input                                                                 │
+│      │                                                                      │
+│      ▼                                                                      │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                     │
+│  │ Gatekeeper  │───▶│  Context    │───▶│ Operational │                     │
+│  │ (Security)  │    │  Manager    │    │   Module    │                     │
+│  └─────────────┘    └─────────────┘    └──────┬──────┘                     │
+│                                               │                             │
+│         ┌────────────────────────────────────┼────────────────────┐        │
+│         │                    │               │                     │        │
+│         ▼                    ▼               ▼                     ▼        │
+│  ┌────────────┐  ┌────────────────┐  ┌────────────┐  ┌────────────────┐    │
+│  │ IntentRoute│  │TaskDecomposer  │  │Simulation  │  │ ExpertsModule  │    │
+│  │ (Classify) │  │(Parse problem) │  │  Engine    │  │(LLM reasoning) │    │
+│  └────────────┘  └────────────────┘  └────────────┘  └───────┬────────┘    │
+│                                                               │             │
+│                                                     ┌─────────┴─────────┐   │
+│                                                     │     Critic        │   │
+│                                                     │  (Verification)   │   │
+│                                                     └─────────┬─────────┘   │
+│                                                               │             │
+│                              ┌────────────────────────────────┘             │
+│                              ▼                                              │
+│                     ┌─────────────────┐                                     │
+│                     │    Sanitizer    │                                     │
+│                     │ (Anti-leakage)  │                                     │
+│                     └────────┬────────┘                                     │
+│                              │                                              │
+│                              ▼                                              │
+│                         Response ──────▶ LearningDecoder ──▶ Reflection     │
+│                                                                   │         │
+│                                                                   ▼         │
+│                                                            Homeostasis      │
+│                                                          (Policy update)    │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 📁 Directory Structure
+## 📁 Complete Directory Structure
 
 ```
 agi2/
-├── main.py              # Entry point, CognitiveSystem
-├── web.py               # FastAPI web interface
-├── config.yaml          # Model configuration
+├── main.py                  # Entry point, CognitiveSystem class
+├── web.py                   # FastAPI web interface + real-time stats
+├── config.yaml              # Model configuration (main, fast, tools)
+├── ARCHITECTURE.md          # This file
+├── README.md                # Project overview
+├── requirements.txt         # Python dependencies
+├── run.bat                  # Windows launcher script
 │
-├── core/                # Core modules
-│   ├── operational_module.py   # Central decision maker
-│   ├── context_manager.py      # Memory & context
-│   ├── gatekeeper.py           # Security & trust
-│   ├── experts.py              # LLM experts + tool dispatch
-│   ├── intent_router.py        # Intent classification
+├── core/                    # ═══ CORE MODULES ═══
+│   ├── __init__.py
+│   ├── config.py                 # Global config loader
 │   │
-│   ├── # NEW ARCHITECTURE
-│   ├── orchestrator.py         # Module registry & hot-swap
-│   ├── task_queue.py           # Priority queue
-│   ├── info_broker.py          # Unified info retrieval
-│   ├── task_decomposer.py      # Complex problem parsing
-│   ├── simulation_engine.py    # Deterministic calculations
-│   ├── sanitizer.py            # Anti-data-leakage
-│   ├── fallback_generator.py   # Graceful "I don't know"
+│   ├── # ─── MAIN PIPELINE ───
+│   ├── gatekeeper.py             # Security gate, trust scoring
+│   ├── context_manager.py        # Short/long-term memory, facts
+│   ├── operational_module.py     # Central decision maker (O.M.)
+│   ├── intent_router.py          # Intent classification (fast/LLM)
+│   ├── experts.py                # LLM experts + tool dispatch
+│   ├── validator.py              # Response semantic validation
 │   │
-│   ├── # UTILITIES
-│   ├── ontology.py             # Self-identity & search blocking
-│   ├── tools.py                # Tool definitions
-│   ├── search_engine.py        # Web search
-│   └── validator.py            # Response validation
+│   ├── # ─── ORCHESTRATION (NEW) ───
+│   ├── orchestrator.py           # Module registry, hot-swap
+│   ├── task_queue.py             # Priority queue (CRITICAL→BACKGROUND)
+│   ├── info_broker.py            # Unified info retrieval + fallback
+│   │
+│   ├── # ─── PROBLEM SOLVING (NEW) ───
+│   ├── task_decomposer.py        # Parse complex problems (GIVEN/MISSING)
+│   ├── simulation_engine.py      # Deterministic FSM/Math (code, not LLM)
+│   │
+│   ├── # ─── SAFETY (NEW) ───
+│   ├── sanitizer.py              # Block passwords, API keys, tokens
+│   ├── fallback_generator.py     # Graceful "I don't know" templates
+│   ├── identity_filter.py        # Remove LLM identity mentions
+│   │
+│   ├── # ─── UTILITIES ───
+│   ├── ontology.py               # Self-identity, search blocking patterns
+│   ├── tools.py                  # Tool definitions & registry
+│   └── search_engine.py          # Web search (DuckDuckGo)
 │
-├── models/              # Data schemas & LLM interface
-│   ├── schemas.py              # Pydantic models
-│   └── llm_interface.py        # LLM abstraction
+├── learning/                # ═══ SELF-LEARNING SYSTEM ═══
+│   ├── __init__.py
+│   ├── learning_decoder.py       # Episode processing, pattern extraction
+│   ├── reflection.py             # Background reflection loop
+│   ├── homeostasis.py            # Policy auto-tuning
+│   └── impact_resolver.py        # Pattern → policy change mapping
 │
-├── learning/            # Self-learning system
-│   ├── reflection.py           # Pattern extraction
-│   └── homeostasis.py          # Policy auto-tuning
+├── models/                  # ═══ DATA SCHEMAS & LLM ═══
+│   ├── __init__.py
+│   ├── schemas.py                # Pydantic models (30+ schemas)
+│   └── llm_interface.py          # LLM abstraction (Ollama, multi-model)
 │
-└── config/
-    └── intent_rules.yaml       # Intent classification rules
+├── config/                  # ═══ CONFIGURATION ═══
+│   └── intent_rules.yaml         # Keyword-based intent rules
+│
+├── learning_data/           # ═══ DATA STORAGE (git-ignored) ═══
+│   ├── episodes/                 # Raw conversation traces
+│   ├── patterns/                 # Extracted patterns
+│   └── policies/                 # Policy snapshots
+│
+└── tests/                   # ═══ TESTS ═══
+    ├── test_intent_router.py
+    └── ...
 ```
 
 ---
 
 ## 🔗 Module Interactions
 
-### Main Pipeline
+### Main Request Pipeline
 ```
 User Input
     │
     ▼
 ┌──────────────┐
-│  Gatekeeper  │ ─── Identifies user, calculates trust level
+│  Gatekeeper  │ ─── identify() → UserIdentity (trust_level, anomalies)
 └──────┬───────┘
-       │ UserIdentity
-       ▼
-┌──────────────┐
-│ ContextMgr   │ ─── Builds context slice (recent events, facts)
-└──────┬───────┘
-       │ ContextSlice
-       ▼
-┌──────────────┐
-│    O.M.      │ ─── Routes by intent, calls experts/simulation
-└──────┬───────┘
-       │
-       ├──▶ TaskDecomposer ─── Parses complex problems
-       │
-       ├──▶ SimulationEngine ─── Deterministic FSM/Math
-       │
-       ├──▶ ExpertsModule ─── LLM reasoning + tools
-       │         │
-       │         └──▶ ToolsRegistry ─── Execute tools
        │
        ▼
 ┌──────────────┐
-│  Sanitizer   │ ─── Redacts passwords, API keys
-└──────┬───────┘
+│ ContextMgr   │ ─── get_context_slice() → ContextSlice
+└──────┬───────┘      (recent_events, long_term_facts, world_state)
        │
        ▼
-   Response
+┌──────────────┐
+│ IntentRouter │ ─── classify() → (intent, confidence)
+└──────┬───────┘      Fast path (keywords) or LLM classification
+       │
+       ▼
+┌──────────────┐
+│    O.M.      │ ─── _decide_depth() → FAST / MEDIUM / DEEP
+└──────┬───────┘
+       │
+       ├── FAST ────────▶ Direct LLM response
+       │
+       ├── MEDIUM ──────▶ LLM + memory context
+       │
+       └── DEEP ────────┬──▶ TaskDecomposer.decompose()
+                        │       └── DecomposedProblem (entities, rules)
+                        │
+                        ├──▶ SimulationEngine.run_robot_simulation()
+                        │       └── SimulationResult (deterministic)
+                        │
+                        └──▶ ExpertsModule.consult_all()
+                                │   └── 6 expert perspectives
+                                ▼
+                        ┌────────────┐
+                        │   Critic   │ ─── analyze() → CoVe verification
+                        └─────┬──────┘
+                              │
+                              ▼
+                      ┌────────────┐
+                      │ Sanitizer  │ ─── sanitize() → redact sensitive data
+                      └─────┬──────┘
+                            │
+                            ▼
+                       Response
 ```
 
-### Key Data Flows
+### Learning Loop (Background)
+```
+Response + Decision
+        │
+        ▼
+┌────────────────┐
+│ LearningDecoder│ ─── add_trace() → Store episode
+└───────┬────────┘
+        │ (every N interactions)
+        ▼
+┌────────────────┐
+│  Reflection    │ ─── run_reflection() → Extract patterns
+└───────┬────────┘
+        │
+        ▼
+┌────────────────┐
+│ImpactResolver  │ ─── resolve() → Pattern → PolicyUpdate
+└───────┬────────┘
+        │
+        ▼
+┌────────────────┐
+│ Homeostasis    │ ─── apply_update() → Adjust thresholds
+└────────────────┘
+```
 
-| From | To | Data |
-|------|----|------|
-| Gatekeeper | ContextManager | `UserIdentity` (trust, anomalies) |
-| ContextManager | OperationalModule | `ContextSlice` (events, facts, state) |
-| IntentRouter | OperationalModule | `(intent, confidence)` |
-| TaskDecomposer | OperationalModule | `DecomposedProblem` (entities, rules) |
-| SimulationEngine | OperationalModule | `SimulationResult` (deterministic) |
-| ExpertsModule | CriticModule | `ExpertResponse[]` |
-| Sanitizer | main.py | `SanitizationResult` |
+---
+
+## 📊 Key Data Schemas
+
+| Schema | File | Purpose |
+|--------|------|---------|
+| `UserIdentity` | schemas.py | Trust level, session data |
+| `ContextSlice` | schemas.py | Current context for O.M. |
+| `DecisionObject` | schemas.py | Decision + reasoning trace |
+| `ExpertResponse` | schemas.py | Single expert output |
+| `CriticAnalysis` | schemas.py | Verification results |
+| `PolicySpace` | schemas.py | System parameters |
+| `RawTrace` | schemas.py | Full conversation trace |
+| `ExtractedPattern` | schemas.py | Learning pattern |
+| `SimulationResult` | simulation_engine.py | FSM/Math result |
+| `DecomposedProblem` | task_decomposer.py | Parsed problem |
 
 ---
 
 ## 🆕 New Components (Dec 2024)
 
+### Orchestration Layer
 | Module | Purpose | Key Methods |
 |--------|---------|-------------|
-| **Orchestrator** | Module registry, hot-swap | `register_module()`, `dispatch()` |
-| **TaskQueue** | Priority task scheduling | `enqueue()`, `dequeue()` |
-| **InfoBroker** | Unified info retrieval | `request_info()` with fallback chain |
-| **TaskDecomposer** | Parse complex problems | `decompose()` → entities, rules, missing data |
-| **SimulationEngine** | Code-based calculations | `FSMSimulator`, `MathSolver` |
-| **Sanitizer** | Prevent data leakage | Regex patterns for passwords, keys |
-| **FallbackGenerator** | Graceful "I don't know" | Templates for uncertainty |
+| `Orchestrator` | Module registry, hot-swap | `register_module()`, `dispatch()`, `replace_module()` |
+| `TaskQueue` | Priority scheduling | `enqueue()`, `dequeue()`, `wait_for()` |
+| `InfoBroker` | Unified info retrieval | `request_info()` → Cache→Memory→Search→Expert→Fallback |
+
+### Problem Solving Layer
+| Module | Purpose | Key Methods |
+|--------|---------|-------------|
+| `TaskDecomposer` | Parse GIVEN vs MISSING data | `decompose()`, `is_complex_problem()` |
+| `SimulationEngine` | Deterministic calculations | `FSMSimulator`, `MathSolver`, `parse_robot_scenario()` |
+
+### Safety Layer
+| Module | Purpose | Key Methods |
+|--------|---------|-------------|
+| `Sanitizer` | Block sensitive data | `sanitize()` → regex for passwords, API keys |
+| `FallbackGenerator` | "I don't know" templates | `admit_uncertainty()`, `suggest_clarification()` |
+| `IdentityFilter` | Remove LLM identity leaks | Filter "As an AI", "I'm Gemma" etc. |
 
 ---
 
-## 🔧 Configuration
+## ⚙️ Configuration Files
 
-### Model Selection (`config.yaml`)
+### `config.yaml` - Model Selection
 ```yaml
 models:
-  main: "gemma3:12b"    # Main reasoning
-  fast: "gemma3:4b"     # Quick responses
-  tools: "qwen2.5:7b"   # Tool calling
+  main: "gemma3:12b"      # Main reasoning (deep path)
+  fast: "gemma3:4b"       # Quick responses (fast path)
+  tools: "qwen2.5:7b"     # Tool calling (FunctionGemma)
+  use_ollama: true
 ```
 
-### Intent Rules (`config/intent_rules.yaml`)
+### `config/intent_rules.yaml` - Intent Classification
 ```yaml
 intents:
   realtime_data:
-    keywords: [price, weather, news]
+    keywords: [price, weather, news, stock, crypto]
     threshold: 0.7
+  calculation:
+    keywords: [calculate, compute, formula]
+    threshold: 0.8
+  philosophical:
+    keywords: [meaning, ethics, consciousness]
+    threshold: 0.6
 ```
 
 ---
 
-## 🚦 Decision Flow
+## 🚦 Decision Depth Flow
 
 ```
-Intent Classification
-        │
-        ├── smalltalk/confirmation ──▶ FAST path (1 LLM call)
-        │
-        ├── recall/memorize ──▶ MEDIUM path (+ memory)
-        │
-        └── complex/calculation ──▶ DEEP path
-                    │
-                    ├── FSM detected? ──▶ SimulationEngine
-                    │
-                    └── Otherwise ──▶ Experts + Critic
+Intent + Confidence
+         │
+         ├── confidence > 0.85 ────────────▶ FAST (1 LLM call)
+         │   └── smalltalk, confirmation
+         │
+         ├── 0.5 < confidence < 0.85 ──────▶ MEDIUM (LLM + context)
+         │   └── recall, factual
+         │
+         └── confidence < 0.5 OR complex ──▶ DEEP (Experts + Critic)
+                  │
+                  └── FSM detected? ───┬──▶ SimulationEngine (code)
+                                       │
+                                       └──▶ Experts (LLM)
 ```
 
 ---
 
-## 📊 Monitoring
+## 🔒 Search Blocking (ontology.py)
 
-### CLI Commands
-- `/health` - System health report
-- `/policy` - Current policy parameters
-- `/stats` - LLM usage statistics
-- `/memory` - Memory status
-- `/reflect` - Force reflection
+Patterns that block web search:
+- Math expressions: `\d+\s*[\*\+\-\/]\s*\d+`
+- Self-analysis: `себя`, `yourself`, `what are you`
+- Priority problems: `правило.*приоритет`
+- Conditional rules: `ниже 10%`, `если.*скидка`
+- Resource allocation: `порт.*всего \d+`
 
-### Key Metrics
-- `cost.time_ms` - Response latency
-- `cost.experts_used` - Number of experts called
-- `sanitizer.redactions_count` - Data leakage blocks
+---
+
+## � Monitoring & CLI Commands
+
+| Command | Purpose |
+|---------|---------|
+| `/health` | System health report |
+| `/policy` | Current PolicySpace values |
+| `/stats` | LLM usage statistics |
+| `/memory` | Memory store status |
+| `/reflect` | Trigger manual reflection |
+| `/clean` | Clear all memory |
+| `/sanitize` | Remove LLM identity from history |
+
+---
+
+## 🔄 Key Metrics
+
+| Metric | Location | Description |
+|--------|----------|-------------|
+| `cost.time_ms` | DecisionObject | Response latency |
+| `cost.experts_used` | DecisionObject | Number of experts called |
+| `sanitizer.redactions_count` | SanitizationResult | Data leakage blocks |
+| `trust_level` | UserIdentity | User trust score (0-1) |
+| `confidence` | IntentRouter | Intent classification confidence |
