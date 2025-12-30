@@ -17,6 +17,7 @@ from models.llm_interface import LLMInterface
 from core.experts import ExpertsModule, CriticModule
 from core.validator import SemanticValidator
 from core.ontology import is_internal_query, entity_exists, extract_entity_name, should_block_search, get_ontology_response
+from core.tracer import tracer
 
 if TYPE_CHECKING:
     from core.info_broker import InfoBroker
@@ -77,6 +78,7 @@ class OperationalModule:
         self.validator = SemanticValidator(llm)
         
         # NEW: Store modular components
+        print(f"[OM] Initializing with info_broker: {info_broker}")
         self.info_broker = info_broker
         self.sanitizer = sanitizer
         self.fallback_generator = fallback_generator
@@ -97,6 +99,10 @@ class OperationalModule:
         # Initialize Intent Router
         from core.intent_router import IntentRouter
         self.intent_router = IntentRouter(llm)
+        
+        # Phase 6: SRA Specialist
+        from core.sra_specialist import SRASpecialist
+        self.sra = SRASpecialist(llm=tool_caller or llm)
     
     async def process(
         self,
@@ -114,28 +120,91 @@ class OperationalModule:
         start_time = time.time()
         
         # Step 1: Classify intent and determine depth
+        tracer.add_step("intent_router", "Classify", f"Classifying user input: {context_slice.user_input[:50]}...")
         intent, confidence = await self.intent_router.classify(context_slice.user_input)
+        tracer.add_step("intent_router", "Result", f"Intent: {intent}, Confidence: {confidence:.2f}", data_out={"intent": intent, "confidence": confidence})
+        
+        tracer.add_step("operational_module", "Decide Depth", "Choosing decision pipeline depth")
         depth = self._decide_depth(intent, confidence, context_slice)
+        tracer.add_step("operational_module", "Result", f"Path chosen: {depth.value}")
         
         # Step 1.5: Handle recall intent (RAG)
         if intent == "recall" and context_manager:
+            tracer.add_step("context_manager", "Recall", "Searching long-term memory for relevant facts")
             relevant_facts = context_manager.get_context_for_recall(context_slice.user_input)
             context_slice.long_term_context = relevant_facts
+            tracer.add_step("context_manager", "Result", f"Found {len(relevant_facts)} characters of relevant data")
             print(f"[OM] Recall triggered. Long-term context added.")
         
+        # ========================================
+        # PHASE 1: DISCOVERY (Phase 6 Advanced)
+        # ========================================
+        # Discovery should run for any intent that might need external data
+        needs_discovery = depth in [DecisionDepth.MEDIUM, DecisionDepth.DEEP] or intent in ["realtime_data", "complex", "analytical", "factual"]
+        
+        if needs_discovery:
+            tracer.add_step("om", "Discovery", "Analysing information dependencies...")
+            requirements = await self.sra.identify_requirements(
+                query=context_slice.user_input,
+                context=context_slice.long_term_context or ""
+            )
+            print(f"[OM] SRA identified requirements: {requirements}")
+            
+            missing_requirements = self.sra.filter_existing_facts(requirements, context_slice.world_state)
+            
+            # Logic vs Data Check: 
+            # If it's a logic intent and we already have all data, skip search.
+            is_logic_task = intent in ["analytical", "calculation", "philosophical"]
+            if is_logic_task and not missing_requirements:
+                print(f"[OM] LOGIC TASK DETECTED: No external data needed for '{intent}' query. Bypassing Search.")
+                tracer.add_step("om", "Logic Skip", "Task determined to be self-contained; skipping external discovery.")
+            elif missing_requirements:
+                print(f"[OM] Discovery Phase: Identified {len(missing_requirements)} missing info requirements.")
+                retrieved_info = []
+                for req in missing_requirements:
+                    req_query = f"{req['entity']} {req['variable']}"
+                    
+                    # Call InfoBroker with domain specific specialists and volatility hint
+                    info_result = await self.info_broker.request_info(
+                        query=req_query,
+                        domain=req.get('domain', 'general'),
+                        world_state=context_slice.world_state,
+                        volatility=req.get('volatility', 'low')
+                    )
+                    
+                    if info_result and info_result.data:
+                        retrieved_info.append(f"VERIFIED FACT ({req['entity']} {req['variable']}): {info_result.data}")
+                
+                if retrieved_info:
+                    print(f"[OM] Discovery Phase found {len(retrieved_info)} facts.")
+                    verification_block = "\n".join(retrieved_info)
+                    # Correctly inject into context slice
+                    context_slice.long_term_context = (
+                        f"## VERIFIED GROUND TRUTH DATA:\n{verification_block}\n" + 
+                        (context_slice.long_term_context or "")
+                    )
+                    # Escalate depth if we found complex requirements
+                    if len(missing_requirements) >= 1:
+                        depth = DecisionDepth.DEEP
+
         # Step 1.6: Task Decomposition for complex problems (NEW)
         decomposed_problem = None
-        structured_context = ""
         simulation_result = None
         
         if self.task_decomposer.is_complex_problem(context_slice.user_input):
+            tracer.add_step("task_decomposer", "Decompose", "Parsing complex problem structure")
             decomposed_problem = self.task_decomposer.decompose(context_slice.user_input)
             structured_context = self.task_decomposer.get_structured_prompt(decomposed_problem)
+            tracer.add_step("task_decomposer", "Result", f"Entities: {len(decomposed_problem.entities)}, Facts: {len(decomposed_problem.given_facts)}", data_out=decomposed_problem.to_dict())
+            
             print(f"[OM] Complex problem detected:")
             print(f"     - Entities: {decomposed_problem.entities}")
             print(f"     - Given facts: {list(decomposed_problem.given_facts.keys())}")
             print(f"     - Missing data (DO NOT INVENT): {decomposed_problem.missing_facts}")
             print(f"     - Subtasks: {len(decomposed_problem.subtasks)}")
+            
+            # NOTE: Old Active Retrieval block removed in Phase 6 in favor of Phase 1: Discovery.
+            # We only keep the decomposition for subtask/rule structuring.
             
             # Inject structured context to prevent hallucination
             context_slice.long_term_context = structured_context + "\n\n" + (context_slice.long_term_context or "")
@@ -166,11 +235,76 @@ class OperationalModule:
 {context_slice.long_term_context or ""}"""
                 else:
                     print(f"[OM] Simulation: {simulation_result.error}")
+        
+        elif sim_type == SimulationType.MATH:
+            print(f"[OM] MATH/Resource Simulation detected")
+            scen = self.simulation_engine.parse_consumption_scenario(context_slice.user_input)
+            
+            # Active Retrieval for missing distance
+            if scen and "distance_lookup_needed" in scen.get("missing", []):
+                print(f"[OM] Distance missing. Attempting active retrieval via InfoBroker...")
+                # Extract locations from query for better search
+                loc_query = context_slice.user_input
+                # Try to find "distance from X to Y"
+                search_query = f"driving distance {loc_query}"
+                if "из" in loc_query and "в" in loc_query:
+                     # Simple heuristic
+                     search_query = f"расстояние {loc_query}"
+                
+                # Use InfoBroker to search
+                search_result = await self.info_broker.request_info(
+                     query=search_query, 
+                     context=context_slice,
+                     depth=depth
+                )
+                
+                # Try to extract distance from search result
+                # Use generalized parsing for result content
+                found_scen = self.simulation_engine.parse_consumption_scenario(search_result.content)
+                found_dist = found_scen.get("distance")
+                
+                if found_dist:
+                    print(f"[OM] Found distance via search: {found_dist} {found_scen['units']['dist']}")
+                    scen["distance"] = found_dist
+                    scen["units"]["dist"] = found_scen["units"]["dist"]
+                    scen["missing"].remove("distance_lookup_needed")
+                    if "distance" in scen["missing"]:
+                        scen["missing"].remove("distance")
+            
+            if scen and scen.get("consumption_rate") is not None and scen.get("distance") is not None:
+                print(f"[OM] Running ResourceSolver with: {scen}")
+                simulation_result = self.simulation_engine.resource.calculate_trip_requirements(
+                    distance=scen["distance"],
+                    consumption_rate=scen["consumption_rate"],
+                    rate_unit_dist=scen.get("rate_unit_dist", 100.0),
+                    current_resource=scen.get("current_resource", 100.0),
+                    units=scen.get("units", {"dist": "km", "res": "%"})
+                )
+                
+                if simulation_result.success:
+                    print(f"[OM] Simulation SUCCESS: {simulation_result.final_values}")
+                    context_slice.long_term_context = f"""
+## DETERMINISTIC CALCULATION RESULT (use these EXACT values):
+{simulation_result.answer_text}
+
+{context_slice.long_term_context or ""}"""
+            else:
+                if scen:
+                    print(f"[OM] ResourceSolver missing params: {scen.get('missing')}")
+                    # Optional: Inject hint for expert if distance missing
+                    if "distance_lookup_needed" in scen.get("missing", []):
+                         context_slice.long_term_context = f"""
+[SYSTEM HINT] The user asks for a trip calculation but distance is missing. 
+Use a SEARCH TOOL to find the driving distance between the locations.
+Then apply the formula: Total = (Distance / {scen.get('rate_unit_dist', 100)}) * {scen.get('consumption_rate', '?')}.
+\n{context_slice.long_term_context or ""}"""
             
         # Step 1.7: Generate internal thoughts for complex tasks
         thoughts = ""
         if depth == DecisionDepth.DEEP:
+            tracer.add_step("operational_module", "Generate Thoughts", "Generating inner monologue / strategy")
             thoughts = await self._generate_thoughts(context_slice)
+            tracer.add_step("operational_module", "Inner Monologue", thoughts[:100] + "...")
             print(f"[OM] Inner Monologue: {thoughts[:80]}...")
             
         # Step 2: Generate response based on depth
@@ -201,10 +335,12 @@ class OperationalModule:
             
         elif depth == DecisionDepth.MEDIUM:
             # Medium path: LLM + memory context
+            tracer.add_step("operational_module", "Medium Path", "Executing LLM with memory context")
             response = await self._medium_response(context_slice)
             
             # DEPTH ESCALATION: If MEDIUM response needs tools, escalate to DEEP
             if "NEED_TOOL:" in response:
+                tracer.add_step("operational_module", "Escalate", "Tool required - escalating to DEEP")
                 print(f"[OM] Escalating from MEDIUM to DEEP (tool required)")
                 thoughts = await self._generate_thoughts(context_slice)
                 response, expert_outputs, critic_output = await self._deep_response(context_slice, thoughts)
@@ -212,6 +348,7 @@ class OperationalModule:
             
         else:  # DEEP
             # Deep path: experts + critic
+            tracer.add_step("experts_module", "Deep Path", "Consulting multiple expert perspectives")
             response, expert_outputs, critic_output = await self._deep_response(context_slice, thoughts)
         
         # Step 2.6: Handle insufficient information (NEW)
@@ -255,6 +392,7 @@ class OperationalModule:
             depth_used=depth,
             cost={"time_ms": elapsed_ms, "experts_used": len(expert_outputs)},
             policy_snapshot=self.policy.to_dict(),
+            intent=intent,
             reasoning=f"Intent: {intent}, Depth: {depth.value}",
             thoughts=thoughts,
             validation_report=validation_report
@@ -323,6 +461,17 @@ class OperationalModule:
                     pass
         
         # ═══════════════════════════════════════════════════════════════
+        # MEMORY INTENTS: Special routing for fact handling
+        # ═══════════════════════════════════════════════════════════════
+        if intent == "memorize":
+            # Memorize has special handler, use FAST (actually skips normal path)
+            return DecisionDepth.FAST
+        
+        if intent == "recall":
+            # Recall needs long-term memory access - use MEDIUM to include context
+            return DecisionDepth.MEDIUM
+        
+        # ═══════════════════════════════════════════════════════════════
         # NEW INTENTS: Force FAST/MEDIUM to prevent expert calls
         # ═══════════════════════════════════════════════════════════════
         NO_EXPERT_INTENTS = [
@@ -337,7 +486,6 @@ class OperationalModule:
             print(f"[OM] NO-EXPERT PATH: Intent '{intent}' -> FAST (pure LLM)")
             return DecisionDepth.FAST
         
-        # PRIORITY: Realtime data & Calculation ALWAYS requires DEEP path (tools)
         # PRIORITY: Realtime data & Calculation ALWAYS requires DEEP path (tools)
         if intent in ["realtime_data", "calculation", "calculation_simple"]:
             return DecisionDepth.DEEP
@@ -369,15 +517,28 @@ class OperationalModule:
     async def _fast_response(self, context: ContextSlice) -> str:
         """Fast path: single LLM call (uses FastLLM if available)."""
         
-        # Inject date and self-identity
         from datetime import datetime
-        # Inject date and simplified identity for FAST path (to avoid hallucinations in small models)
-        from datetime import datetime
-        # Simplified identity for phi3:mini
         current_date_str = datetime.now().strftime("%d.%m.%Y")
         system_msg = f"You are Omega, a helpful AI assistant. Today's date: {current_date_str}. Do not hallucinate."
         
-        prompt = context.user_input
+        # Build short context from recent events (CRITICAL for conversation memory)
+        context_str = ""
+        if context.recent_events:
+            for event in context.recent_events[-5:]:  # Last 5 events for fast path
+                context_str += f"[{event.event_type}] {event.content}\n"
+        
+        # Add long-term context if available
+        if context.long_term_context:
+            context_str = context.long_term_context + "\n" + context_str
+        
+        # Build prompt with context
+        if context_str:
+            prompt = f"""Recent conversation:
+{context_str}
+
+User: {context.user_input}"""
+        else:
+            prompt = context.user_input
         
         # Use fast LLM if router is available
         if hasattr(self.llm, 'generate_fast'):
@@ -390,6 +551,7 @@ class OperationalModule:
         
         return await self.llm.generate(
             prompt=prompt,
+            system_prompt=system_msg,
             temperature=0.7
         )
     
@@ -435,15 +597,26 @@ User message: {context.user_input}"""
     ) -> tuple[str, list[ExpertResponse], CriticAnalysis]:
         """Deep path: experts + critic (uses MainLLM for quality)."""
         
-        # Build context
-        recent_str = "\n".join([
-            f"[{e.event_type}] {e.content}"
-            for e in context.recent_events[-5:]
-        ])
+        # Build context with CLEAR CONVERSATION FLOW
+        # Format events as a readable dialogue to help LLM understand context
+        conversation_parts = []
+        for e in context.recent_events[-5:]:
+            if e.event_type == "user_input":
+                conversation_parts.append(f"User: {e.content}")
+            elif e.event_type == "system_response":
+                conversation_parts.append(f"Assistant: {e.content}")
+            else:
+                conversation_parts.append(f"[{e.event_type}] {e.content}")
+        
+        recent_str = "\n".join(conversation_parts)
+        
+        # Add CONVERSATION CONTEXT header to help LLM understand this is a dialogue
+        if conversation_parts:
+            recent_str = "=== RECENT CONVERSATION (use this context!) ===\n" + recent_str + "\n=== END CONVERSATION ==="
         
         context_str = recent_str
         if context.long_term_context:
-            context_str = context.long_term_context + "\n" + recent_str
+            context_str = context.long_term_context + "\n\n" + recent_str
         
         # Inject thoughts into expert prompt
         if thoughts:
@@ -466,7 +639,8 @@ User message: {context.user_input}"""
         expert_responses = await self.experts.consult_all(
             prompt=context.user_input,
             world_state=context.world_state,
-            context=context_str
+            context=context_str,
+            intent=intent
         )
         
         # Get critic analysis

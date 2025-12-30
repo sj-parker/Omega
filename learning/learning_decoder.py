@@ -74,45 +74,69 @@ class LearningDecoder:
                 with open(trace_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 
-                # Reconstruct RawTrace (simplified - just store as dict for now)
+                # Reconstruct RawTrace
+                from models.schemas import TraceStep
+                
+                steps_data = data.get("steps", [])
+                steps = []
+                for s in steps_data:
+                    steps.append(TraceStep(
+                        module=s.get("module", ""),
+                        name=s.get("name", ""),
+                        description=s.get("description", ""),
+                        data_in=s.get("data_in"),
+                        data_out=s.get("data_out"),
+                        timestamp=datetime.fromisoformat(s.get("timestamp")) if s.get("timestamp") else datetime.now()
+                    ))
+
                 trace = RawTrace(
                     episode_id=data.get("episode_id", ""),
+                    timestamp=datetime.fromisoformat(data.get("timestamp")) if data.get("timestamp") else datetime.now(),
                     user_input=data.get("user_input", ""),
                     context_snapshot=data.get("context_snapshot", {}),
                     expert_outputs=data.get("expert_outputs", []),
                     critic_output=data.get("critic_output", {}),
                     decision=data.get("decision", {}),
                     final_response=data.get("final_response", ""),
-                    user_reaction=data.get("user_reaction")
+                    user_reaction=data.get("user_reaction"),
+                    thoughts=data.get("thoughts", ""),
+                    validation_report=data.get("validation_report", {}),
+                    world_state_snapshot=data.get("world_state_snapshot", {}),
+                    steps=steps
                 )
                 self.raw_traces.append(trace)
-                
-                # Create a basic summary from the loaded trace
-                confidence = trace.decision.get("confidence", 0.5)
-                # Determine outcome based on confidence
-                if confidence >= 0.7:
-                    outcome = "success"
-                elif confidence >= 0.4:
-                    outcome = "partial"
-                else:
-                    outcome = "failure"
-                
-                summary = EpisodeSummary(
-                    episode_id=trace.episode_id,
-                    summary=f"Loaded: {trace.user_input[:50]}...",
-                    key_metrics={
-                        "confidence": confidence,
-                        "cost_ms": trace.decision.get("cost", {}).get("time_ms", 0),
-                        "experts_used": len(trace.expert_outputs),
-                        "depth": trace.decision.get("depth_used", "unknown")
-                    },
-                    outcome=outcome
-                )
-                self.summaries.append(summary)
                 loaded += 1
                 
             except Exception as e:
                 print(f"[Learning] Error loading {trace_file}: {e}")
+        
+        # Sort traces by timestamp to maintain chronological order
+        self.raw_traces.sort(key=lambda x: x.timestamp)
+        
+        # Rebuild summaries in correct order
+        self.summaries = []
+        for trace in self.raw_traces:
+            confidence = trace.decision.get("confidence", 0.5)
+            # Determine outcome based on confidence
+            if confidence >= 0.7:
+                outcome = "success"
+            elif confidence >= 0.4:
+                outcome = "partial"
+            else:
+                outcome = "failure"
+            
+            summary = EpisodeSummary(
+                episode_id=trace.episode_id,
+                summary=f"Loaded: {trace.user_input[:50]}...",
+                key_metrics={
+                    "confidence": confidence,
+                    "cost_ms": trace.decision.get("cost", {}).get("time_ms", 0),
+                    "experts_used": len(trace.expert_outputs),
+                    "depth": trace.decision.get("depth_used", "unknown")
+                },
+                outcome=outcome
+            )
+            self.summaries.append(summary)
         
         # Load pattern files if they exist
         pattern_file = self.storage_path / "patterns.json"
@@ -154,6 +178,24 @@ class LearningDecoder:
         trace_file = self.storage_path / f"trace_{trace.episode_id}.json"
         with open(trace_file, 'w', encoding='utf-8') as f:
             json.dump(trace.to_dict(), f, ensure_ascii=False, indent=2)
+
+    def record_reflection_trace(self, trace: RawTrace):
+        """Record a reflection trace (same as normal trace, but semantically distinct)."""
+        self.record_trace(trace)
+        
+        # Also create a summary for the history list
+        summary = EpisodeSummary(
+            episode_id=trace.episode_id,
+            summary=f"System Reflection: {trace.decision.get('action', 'Analyzed patterns')}",
+            key_metrics={
+                "confidence": trace.decision.get("confidence", 1.0),
+                "cost_ms": trace.decision.get("cost", {}).get("time_ms", 0),
+                "experts_used": len(trace.expert_outputs),
+                "depth": "reflection" # Special depth tag
+            },
+            outcome="success"
+        )
+        self.summaries.append(summary)
     
     async def create_summary(self, trace: RawTrace) -> EpisodeSummary:
         """
@@ -161,56 +203,52 @@ class LearningDecoder:
         
         This is what goes to reflection, not the raw trace.
         """
+        # Build prompt from trace
+        history_str = ""
+        for s in trace.steps:
+            if s.module in ["gatekeeper", "context_manager", "experts_module", "expert_neutral", "expert_creative", "expert_conservative", "expert_physics"]:
+                history_str += f"- [{s.module}] {s.name}: {s.description}\n"
+        
+        prompt = SUMMARIZE_PROMPT + f"\n\nEPISODE:\nUser Input: {trace.user_input}\nSteps:\n{history_str}\nFinal Response: {trace.final_response}"
+        
+        summary_text = "Analysis failed"
+        outcome = "failure"
+        
         if self.llm:
-            # Use LLM to generate summary
-            prompt = f"""Episode to summarize:
-
-User input: {trace.user_input}
-Experts used: {len(trace.expert_outputs)}
-Decision: {trace.decision.get('action', 'respond')}
-Confidence: {trace.decision.get('confidence', 0)}
-Cost (ms): {trace.decision.get('cost', {}).get('time_ms', 0)}
-Response excerpt: {trace.final_response[:200]}..."""
-            
-            response = await self.llm.generate(
-                prompt=prompt,
-                system_prompt=SUMMARIZE_PROMPT,
-                temperature=0.3
-            )
-            
-            # Parse response
-            summary_text = trace.user_input[:50] + "..."
-            outcome = "partial"
-            
-            for line in response.split('\n'):
-                if line.startswith("SUMMARY:"):
-                    summary_text = line.split(":", 1)[1].strip()
-                elif line.startswith("OUTCOME:"):
-                    outcome = line.split(":", 1)[1].strip().lower()
-        else:
-            # Simple fallback
-            summary_text = f"Query: {trace.user_input[:50]}... → {trace.decision.get('depth_used', 'fast')}"
-            confidence = trace.decision.get('confidence', 0)
-            if confidence >= 0.7:
-                outcome = "success"
-            elif confidence >= 0.4:
-                outcome = "partial"
-            else:
-                outcome = "failure"
+            try:
+                # Use quality_llm if available, otherwise just llm
+                llm_for_summary = getattr(self.llm, 'main_llm', self.llm)
+                response = await llm_for_summary.generate(prompt)
+                
+                # Simple parsing of response
+                if "SUMMARY:" in response:
+                    summary_text = response.split("SUMMARY:")[1].split("OUTCOME:")[0].strip()
+                if "OUTCOME:" in response:
+                    outcome_line = response.split("OUTCOME:")[1].split("KEY_INSIGHT:")[0].strip().lower()
+                    if "success" in outcome_line: outcome = "success"
+                    elif "partial" in outcome_line: outcome = "partial"
+            except Exception as e:
+                print(f"[Learning] Summary generation error: {e}")
         
         summary = EpisodeSummary(
             episode_id=trace.episode_id,
             summary=summary_text,
             key_metrics={
-                "confidence": trace.decision.get("confidence", 0),
+                "confidence": trace.decision.get("confidence", 0.0),
                 "cost_ms": trace.decision.get("cost", {}).get("time_ms", 0),
                 "experts_used": len(trace.expert_outputs),
-                "depth": trace.decision.get("depth_used", "fast")
+                "depth": trace.decision.get("depth_used", "unknown")
             },
             outcome=outcome
         )
         
         self.summaries.append(summary)
+        
+        # Save summary to disk
+        summary_file = self.storage_path / f"summary_{trace.episode_id}.json"
+        with open(summary_file, 'w', encoding='utf-8') as f:
+            json.dump(summary.to_dict(), f, ensure_ascii=False, indent=2)
+            
         return summary
     
     def _pattern_similarity(self, desc1: str, desc2: str) -> float:

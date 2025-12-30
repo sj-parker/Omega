@@ -1,4 +1,40 @@
 rules:
+  # Memory intents - HIGHEST priority for fact handling
+  memorize:
+    threshold: 1
+    keywords:
+      - "запомн"
+      - "запам'ят"
+      - "remember"
+      - "сохрани"
+      - "збережи"
+      - "save"
+
+  recall:
+    threshold: 1
+    keywords:
+      - "что я говорил"
+      - "що я казав"
+      - "what did i say"
+      - "what was"
+      - "какой был"
+      - "який був"
+      - "напомни"
+      - "нагадай"
+      - "remind me"
+      - "ты помнишь"
+      - "ти пам'ятаєш"
+      - "do you remember"
+      - "мой пароль"  # When asking about saved password
+      - "мій пароль"
+      - "my password"
+      - "что ты знаешь"
+      - "що ти знаєш"
+      - "what do you know"
+      - "вспомни"
+      - "згадай"
+      - "recall"
+
   realtime_data:
     threshold: 1
     keywords:
@@ -15,6 +51,14 @@ rules:
       - "stock"
       - "акци"
       - "exchange rate"
+      - "movie"
+      - "cinema"
+      - "кино"
+      - "фильм"
+      - "сеанс"
+      - "concert"
+      - "концерт"
+      - "афиша"
 
   analytical: # REASONING_KEYWORDS
     threshold: 2
@@ -62,12 +106,6 @@ rules:
       - "механическ"
       - "зеркальн"
       - "дзеркальн"
-      # Date/time awareness
-      - "какой сегодня"
-      - "який сьогодні"
-      - "what day"
-      - "what date"
-      - "сегодня день"
 
   philosophical:
     threshold: 2
@@ -104,8 +142,6 @@ rules:
       - "think"
       - "считаешь"
       - "believe"
-      - "представь"
-      - "imagine"
       - "между нами"
       - "between us"
 
@@ -162,3 +198,48 @@ rules:
       - "rate="
       - "start="
       - "equation"
+
+  creative:
+    threshold: 1
+    keywords:
+      - "напиши"
+      - "сочинить"
+      - "придумай"
+      - "представь"
+      - "монолог"
+      - "стих"
+      - "рассказ"
+      - "write"
+      - "compose"
+      - "imagine"
+      - "monologue"
+      - "story"
+      - "poem"
+      - "сочини"
+
+  factual:
+    threshold: 1
+    keywords:
+      - "посмотри в интернете"
+      - "поглянь в інтернеті"
+      - "search online"
+      - "look up"
+      - "событи"
+      - "подиї"
+      - "event"
+      - "праздник"
+      - "свято"
+      - "holiday"
+      - "день рожден"
+      - "birthday"
+      - "какой сегодня"
+      - "який сьогодні"
+      - "what day"
+      - "what date"
+      - "сегодня день"
+      - "мероприяти"
+      - "заход"
+      - "событи"
+      - "кино"
+      - "фильм"
+      - "афиша"

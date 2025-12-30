@@ -7,6 +7,49 @@ from datetime import datetime
 from enum import Enum
 import json
 import uuid
+from dataclasses import asdict
+
+
+# ============================================================
+# TRACING & MONITORING
+# ============================================================
+
+@dataclass
+class TraceStep:
+    """Единичный шаг в трассировке запроса."""
+    module: str
+    name: str
+    description: str
+    data_in: Any = None
+    data_out: Any = None
+    timestamp: datetime = field(default_factory=datetime.now)
+
+    def to_dict(self) -> dict:
+        def serialize(obj):
+            if hasattr(obj, 'to_dict') and callable(obj.to_dict):
+                return obj.to_dict()
+            if isinstance(obj, (list, tuple, set)):
+                return [serialize(i) for i in obj]
+            if isinstance(obj, dict):
+                return {str(k): serialize(v) for k, v in obj.items()}
+            if isinstance(obj, datetime):
+                return obj.isoformat()
+            if hasattr(obj, '__dict__'): # Fallback for other dataclasses or objects
+                try:
+                    return {k: serialize(v) for k, v in obj.__dict__.items() if not k.startswith('_')}
+                except:
+                    return str(obj)
+            return obj
+
+        return {
+            "module": self.module,
+            "name": self.name,
+            "description": self.description,
+            "data_in": serialize(self.data_in),
+            "data_out": serialize(self.data_out),
+            "timestamp": self.timestamp.isoformat(),
+        }
+
 
 
 # ============================================================
@@ -44,6 +87,18 @@ class DecisionDepth(Enum):
     DEEP = "deep"       # experts + critic
 
 
+class ContextScope(Enum):
+    """Scope of context to provide to a task.
+    
+    Used for Task-Based Context Slicing - each task specifies
+    how much context it needs, preventing prompt overload.
+    """
+    NONE = "none"           # No context needed (search, calculation)
+    RECENT = "recent"       # Last N events only
+    RELEVANT = "relevant"   # Semantic search filtered facts
+    FULL = "full"           # Complete context slice
+
+
 @dataclass
 class DecisionObject:
     """Результат решения ОМ."""
@@ -55,6 +110,7 @@ class DecisionObject:
     reasoning: str = ""
     thoughts: str = ""
     validation_report: dict = field(default_factory=dict)
+    intent: str = "unknown" # Added field
     
     def to_dict(self) -> dict:
         return {
@@ -66,6 +122,7 @@ class DecisionObject:
             "reasoning": self.reasoning,
             "thoughts": self.thoughts,
             "validation_report": self.validation_report,
+            "intent": self.intent,
         }
 
 
@@ -215,6 +272,7 @@ class RawTrace:
     thoughts: str = ""
     validation_report: dict = field(default_factory=dict)
     world_state_snapshot: dict = field(default_factory=dict)
+    steps: list[TraceStep] = field(default_factory=list) # Trace steps for visualization
     
     def to_dict(self) -> dict:
         return {
@@ -230,6 +288,7 @@ class RawTrace:
             "thoughts": self.thoughts,
             "validation_report": self.validation_report,
             "world_state_snapshot": self.world_state_snapshot,
+            "steps": [s.to_dict() for s in self.steps],
         }
 
 

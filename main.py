@@ -18,6 +18,7 @@ from learning.learning_decoder import LearningDecoder
 from learning.homeostasis import HomeostasisController
 from learning.reflection import ReflectionController
 from core.config import config
+from core.tracer import tracer
 
 # NEW: Modular Architecture Components
 from core.orchestrator import Orchestrator, ModuleInterface, ModuleCapability
@@ -102,8 +103,8 @@ class CognitiveSystem:
         
         # Create OperationalModule with new components
         self.om = OperationalModule(
-            self.llm,
-            self.policy,
+            llm=self.llm,
+            policy=self.policy,
             info_broker=self.info_broker,
             sanitizer=self.sanitizer,
             fallback_generator=self.fallback_generator
@@ -136,13 +137,20 @@ class CognitiveSystem:
         
         Returns the system response.
         """
+        # Start tracing session
+        episode_id = str(uuid.uuid4())
+        tracer.start_session(episode_id)
+        
         # Step 1: Security Gate
+        tracer.add_step("gatekeeper", "Identification", f"Verifying user {user_id}", data_in={"user_id": user_id, "message": message})
         identity = self.gatekeeper.identify(user_id, message)
+        tracer.add_step("gatekeeper", "Result", f"Trust level: {identity.trust_level}", data_out=identity.to_dict())
         
         if identity.risk_flag:
             print(f"[Security] Risk detected for user {user_id}, trust: {identity.trust_level}")
         
         # Step 2: Record input in Context Manager
+        tracer.add_step("context_manager", "Record Input", "Saving user message to short-term store")
         self.context_manager.record_user_input(message)
         
         # Step 3: Get or create world state for user
@@ -150,25 +158,37 @@ class CognitiveSystem:
              self.world_states[user_id] = WorldState()
         
         # Step 3.1: Get context slice (through Memory Gate)
+        tracer.add_step("context_manager", "Get Context", "Retrieving relevant context slice")
         context_slice = self.context_manager.get_context_slice(message, identity, self.world_states[user_id])
+        tracer.add_step("context_manager", "Context Slice", f"Retrieved {len(context_slice.recent_events)} recent events", data_out=context_slice.to_dict())
         
         # Step 4: Process through Operational Module
+        tracer.add_step("operational_module", "Process", "Starting central decision making")
         response, decision, trace = await self.om.process(context_slice, self.context_manager)
         
         # Step 4.1: Persist updated world state
         self.world_states[user_id] = context_slice.world_state
         
         # Step 4.2: Apply Response Sanitizer (NEW)
+        tracer.add_step("sanitizer", "Sanitize", "Checking for data leakage in response")
         sanitization = self.sanitizer.sanitize(response, context=message)
         if sanitization.was_modified:
+            tracer.add_step("sanitizer", "Result", f"Redacted {sanitization.redactions_count} items", data_out=sanitization.to_dict())
             print(f"[Sanitizer] Redacted {sanitization.redactions_count} items: {sanitization.redaction_types}")
             response = sanitization.sanitized_text
+        else:
+            tracer.add_step("sanitizer", "Result", "No sensitive data found")
         
         # Step 5: Record response
         self.context_manager.record_system_response(response)
         self.context_manager.record_decision(decision)
         
         # Step 6: Store trace in Learning Decoder
+        # Attach tracer steps to the RawTrace
+        trace.steps = tracer.get_steps()
+        trace.episode_id = episode_id
+        
+        tracer.add_step("learning_decoder", "Record Trace", "Storing episode trace for reflection")
         self.learning_decoder.record_trace(trace)
         
         # Step 7: Create summary for reflection
@@ -180,6 +200,9 @@ class CognitiveSystem:
             
         # Print diagnostics
         print(f"[OM] Depth: {decision.depth_used.value}, Confidence: {decision.confidence:.2f}, Cost: {decision.cost['time_ms']}ms")
+        
+        # End session
+        tracer.end_session()
         
         return response
     

@@ -24,13 +24,13 @@ class SubtaskType(Enum):
 
 @dataclass
 class Subtask:
-    """A subtask in a decomposed problem."""
+    """A single step in a problem solving plan."""
     task_id: int
     task_type: SubtaskType
     description: str
-    depends_on: List[int] = field(default_factory=list)  # IDs of prerequisite tasks
-    given_data: dict = field(default_factory=dict)       # Data available for this task
-    missing_data: List[str] = field(default_factory=list)  # Data that needs to be found
+    depends_on: List[int] = field(default_factory=list)
+    missing_data: List[str] = field(default_factory=list) # Data needed but not in context
+    is_volatile: bool = False # Whether this lookup requires real-time data
     result: Any = None
     status: str = "pending"  # pending, completed, blocked
     
@@ -40,7 +40,10 @@ class Subtask:
             "type": self.task_type.value,
             "description": self.description,
             "depends_on": self.depends_on,
-            "status": self.status
+            "given_data": self.given_data,
+            "missing_data": self.missing_data,
+            "status": self.status,
+            "result": self.result
         }
 
 
@@ -54,6 +57,17 @@ class DecomposedProblem:
     rules: List[str]                      # Rules/constraints to apply
     subtasks: List[Subtask]               # Ordered subtasks
     final_goal: str                       # What the answer should provide
+    
+    def to_dict(self) -> dict:
+        return {
+            "original_query": self.original_query,
+            "entities": self.entities,
+            "given_facts": self.given_facts,
+            "missing_facts": self.missing_facts,
+            "rules": self.rules,
+            "subtasks": [s.to_dict() for s in self.subtasks],
+            "final_goal": self.final_goal
+        }
     
     def get_next_subtask(self) -> Optional[Subtask]:
         """Get the next subtask that can be executed."""
@@ -127,6 +141,13 @@ class TaskDecomposer:
         r"(?:скидк|discount)",
         r"(?:час.*пик|peak.*hour)",
         r"\d+%.*\d+%.*\d+%",  # Multiple percentages
+        # NEW PATTERNS FOR SEARCH & CONDITIONS
+        r"(?:найди|найти|поиск|search|find|lookup)",
+        r"(?:ставка|rate|цена|price|курс|exchange)",
+        r"(?:кредит|loan|debt|mortgage)",
+        r"(?:если|if|when|когда|condition|услови)",
+        r"(?:налог|tax|fee)",
+        r"(?:сколько.*стоит|how.*much|what.*is.*the.*price)"
     ]
     
     # Keywords to extract entities
@@ -151,21 +172,115 @@ class TaskDecomposer:
             if re.search(pattern, query_lower):
                 matches += 1
         
-        # Complex if 2+ indicators or very long query with numbers
+        # Complex if enough indicators OR special keywords
         if matches >= 2:
             return True
-        if len(query) > 500 and len(re.findall(r'\d+', query)) >= 3:
+        
+        # 1. ALWAYS Trigger on calculation/resource problems
+        CALCULATION_INDICATORS = [
+            r"(?:расход|consumption|потреблен)",  # consumption
+            r"(?:заряд|charge|battery|аккумулятор)",  # charging  
+            r"(?:формул|formula)",  # explicit formula request
+            r"(?:рассчит|вычисл|посчитай|calculate|compute)",  # explicit calculation
+            r"(?:бюджет|budget|смета)",  # budget calculation
+        ]
+        
+        for pattern in CALCULATION_INDICATORS:
+            if re.search(pattern, query_lower):
+                return True
+            
+        # 2. Trigger on conditional logic with parameters (if X then Y)
+        if re.search(r"(?:если|if).*(?:\d+|%)", query_lower):
             return True
         
+        # 3. Trigger on multi-intent queries (e.g., "fact AND calculation")
+        conjunctions = [r"\s+и\s+", r"\s+а также\s+", r"\s+and\s+", r"\s+also\s+"]
+        if any(re.search(c, query_lower) for c in conjunctions) and len(re.findall(r'\d+', query_lower)) >= 1:
+            return True
+            
+        # 4. Trigger on long queries with multiple numbers
+        if len(query) > 400 and len(re.findall(r'\d+', query)) >= 3:
+            return True
+
+        # 5. Check for simple lookups (False if NO calculation markers above)
+        if matches < 3:
+            SIMPLE_QUESTION_INDICATORS = [
+                r"находит",                  
+                r"штат",                     
+                r"страна",                   
+                r"город",                    
+                r"weather|погода",           
+                r"курс|price|цена",          
+            ]
+            for pattern in SIMPLE_QUESTION_INDICATORS:
+                if re.search(pattern, query_lower):
+                    return False  # Simple question, don't decompose
+        
+        # 6. Fallback to match count
+        if matches >= 2:
+            return True
+            
         return False
     
-    def decompose(self, query: str) -> DecomposedProblem:
+    async def split_query(self, query: str) -> List[str]:
+        """Split a query into independent sub-queries if needed."""
+        if not self.llm:
+            return [query]
+            
+        # Only split if query is long or has conjunctions
+        conjunctions = [", а ", ", но ", " и ", " but ", " and ", " also "]
+        if len(query) < 50 and not any(c in query.lower() for c in conjunctions):
+            return [query]
+            
+        prompt = f"""Split this user query into a list of INDEPENDENT requests.
+If it's a single request with multiple conditions/facts, return it as a list with ONE item.
+Independent requests are UNRELATED questions (e.g., "How are you? AND what's the weather?").
+
+⚠️ DO NOT split a single calculation or search task into sentences. 
+Example: "Find BTC price. We have 15k budget. Calculate robots." -> This is ONE request.
+Example: "Fact about Mars. Also, calculate 2+2." -> These are TWO requests.
+
+User query: "{query}"
+
+Output ONLY a JSON list of strings in the ORIGINAL query language: ["req1", "req2", ...]"""
+
+        try:
+            response = await self.llm.generate(
+                prompt=prompt,
+                system_prompt="You are a query analysis expert. Split unrelated intents.",
+                temperature=0.0
+            )
+            
+            # Robust JSON extraction
+            import json
+            import re
+            
+            clean_res = response.strip()
+            # Find the first [ and last ]
+            match = re.search(r'\[.*\]', clean_res, re.DOTALL)
+            if match:
+                json_str = match.group(0)
+                parts = json.loads(json_str)
+                if isinstance(parts, list) and parts:
+                    return parts
+        except Exception as e:
+            print(f"[TaskDecomposer] Query split failed: {e}. Raw response: {response[:100]}")
+            
+        return [query]
+
+    async def decompose(self, query: str) -> DecomposedProblem:
         """
         Decompose a complex problem into structured subtasks.
-        Uses rule-based extraction (fast) + optional LLM refinement.
+        Uses recursive decomposition for multi-intent support.
         """
-        self._stats["problems_decomposed"] += 1
+        # Multi-intent splitting is handled by Orchestrator calling split_query first.
+        # This method handles structural decomposition of a SINGLE intent.
         
+        self._stats["problems_decomposed"] += 1
+        return self._do_stuctural_decompose(query)
+
+    def _do_stuctural_decompose(self, query: str) -> DecomposedProblem:
+        """The actual logic for breaking down a complex query."""
         # Step 1: Extract entities
         entities = self._extract_entities(query)
         
@@ -179,7 +294,7 @@ class TaskDecomposer:
         missing_facts = self._identify_missing_data(query, given_facts)
         
         # Step 5: Create subtasks
-        subtasks = self._create_subtasks(entities, rules, given_facts)
+        subtasks = self._create_subtasks(query, entities, rules, given_facts)
         
         # Step 6: Determine final goal
         final_goal = self._extract_goal(query)
@@ -279,7 +394,25 @@ class TaskDecomposer:
         # Price multiplier
         if re.search(r'удваивается|double|×2|x2', query, re.IGNORECASE):
             facts["peak_price_multiplier"] = 2
-        
+
+        # NEW: General unit extraction (Money, Crypto, Quantities)
+        money_matches = re.findall(r'(\d{1,3}(?:[,\s]\d{3})*(?:[\.,]\d+)?)\s*(USD|EUR|GBP|BTC|ETH|\$|€|£|грн|₴|руб|₽)', query, re.I)
+        for val, unit in money_matches:
+            # Clean value (15,000 -> 15000)
+            clean_val = val.replace(',', '').replace(' ', '')
+            facts[f"amount_{unit.lower()}"] = float(clean_val)
+            
+        # Specific cost/budget extraction
+        budget_match = re.search(r'(?:бюджет|budget|всего|total|есть|have)\s*(?:составляет)?\s*(\d{1,3}(?:[,\s]\d{3})*(?:[\.,]\d+)?)\s*(USD|EUR|GBP|BTC|ETH|\$|€|£|грн|₴|руб|₽)', query, re.I)
+        if budget_match:
+            facts["budget"] = float(budget_match.group(1).replace(',', '').replace(' ', ''))
+            facts["budget_unit"] = budget_match.group(2).upper()
+            
+        cost_match = re.search(r'(?:стоит|цена|cost|price)\s*(\d{1,3}(?:[,\s]\d{3})*(?:[\.,]\d+)?)\s*(USD|EUR|GBP|BTC|ETH|\$|€|£|грн|₴|руб|₽)', query, re.I)
+        if cost_match:
+            facts["unit_cost"] = float(cost_match.group(1).replace(',', '').replace(' ', ''))
+            facts["unit_cost_unit"] = cost_match.group(2).upper()
+
         return facts
     
     def _extract_rules(self, query: str) -> List[str]:
@@ -308,22 +441,69 @@ class TaskDecomposer:
         """Identify data that is NOT provided and should NOT be invented."""
         missing = []
         
-        # Check for price per kWh
-        if not re.search(r'\d+[\.,]?\d*\s*(?:USD|EUR|грн|₴|руб|\$|€)/?\s*(?:кВт|kWh)', query):
-            missing.append("base_price_per_kwh (use variable P)")
+        # 1. Dynamic extraction from explicit requests ("Find X", "Search for Y")
+        # Improved regex to handle commas and optional words
+        search_requests = re.findall(r"(?:узнай|найди|поиск|search|find|узнать|найти|какой|какая|какое)[\s,]+(?:чтобы\s+узнать\s+)?([^.!?\n]+)", query, re.I)
+        for req in search_requests:
+            # Clean up: remove "current", "price", etc. to get the core entity
+            clean = re.sub(r"текущу\w*|current|live|now|сейчас|цену|цената|rate|price|курс|температуру|погоду|weather", "", req, flags=re.I).strip()
+            # Also remove trailing prepositions or verbs
+            clean = re.sub(r"\s+(?:в|на|for|at|in|is)\s*$", "", clean, flags=re.I).strip()
+            
+            if clean and len(clean) < 50 and clean not in missing:
+                missing.append(clean)
+
+        # 2. Heuristic extraction for common volatile data (symbols, rates)
+        volatile_patterns = [
+            (r"(?:цена|курс|price|rate)\s+([A-Z]{3,5})", "price of \1"),
+            (r"(?:цена|курс|price|rate)\s+(?:биткоина|bitcoin|btc|эфира|ethereum|eth)", "Bitcoin price"),
+            (r"(?:погода|weather)\s+(?:в|на|in|at)\s+([А-ЯA-Z][а-яa-z]+)", "weather in \1"),
+        ]
+        for pattern, label in volatile_patterns:
+            match = re.search(pattern, query, re.I)
+            if match:
+                # Use simplified label if it's a known pattern
+                if r"\1" in label:
+                    fact = label.replace(r"\1", match.group(1).upper())
+                else:
+                    fact = label
+                if fact not in missing:
+                    missing.append(fact)
+
+        # 3. Domain-specific (Charging) - only if relevant keywords exist
+        charging_keywords = ["заряд", "квтч", "kwh", "станция", "charging", "tesla"]
+        if any(k in query.lower() for k in charging_keywords):
+            # Price per kWh - ONLY if user asks about money/cost
+            if any(k in query.lower() for k in ["цена", "стоимость", "usd", "грн", "₴", "руб", "₽", "сколько стоит", "cost", "price"]):
+                if not re.search(r'\d+[\.,]?\d*\s*(?:USD|EUR|грн|₴|руб|\$|€)/?\s*(?:кВт|kWh)', query):
+                    missing.append("base_price_per_kwh (use variable P)")
+            
+            # Battery capacity - only if explicitly mentioned without value
+            if any(k in query.lower() for k in ["ёмкость", "capacity", "объем"]):
+                if not re.search(r'(?:ёмкость|capacity|объем)\s*\d+\s*(?:кВт|kWh|л|l|гал|gal)', query):
+                    missing.append("battery_capacity_kwh (use variable C)")
+            
+            # Charging speed - only if explicitly mentioned without value
+            if any(k in query.lower() for k in ["скорость", "speed", "мощность", "power"]):
+                if not re.search(r'(?:скорость|speed|мощность|power)\s*\d+\s*(?:кВт|kW)', query):
+                    missing.append("charging_speed_kw (use variable S)")
         
-        # Check for battery capacity
-        if not re.search(r'(?:ёмкость|capacity)\s*\d+\s*(?:кВт|kWh)', query):
-            missing.append("battery_capacity_kwh (use variable C)")
-        
-        # Check for charging speed
-        if not re.search(r'(?:скорость|speed|rate)\s*\d+\s*(?:кВт|kW)', query):
-            missing.append("charging_speed_kw (use variable S)")
-        
+        # 4. Geographical Data (Distance)
+        # Matches "из Полтавы в Одессу", "от Киева до Львова", "from London to Paris"
+        geo_trip_match = re.search(r"(?:из|от|from)\s+([А-ЯA-Z][а-яa-z]+)\s+(?:в|до|to)\s+([А-ЯA-Z][а-яa-z]+)", query)
+        if geo_trip_match:
+            missing.append(f"расстояние между {geo_trip_match.group(1)} и {geo_trip_match.group(2)}")
+            
+        # Explicit distance request
+        dist_req_match = re.search(r"(?:расстояние|distance).*(?:между|between)\s+([А-ЯA-Z][а-яa-z]+)\s+(?:и|and)\s+([А-ЯA-Z][а-яa-z]+)", query, re.I)
+        if dist_req_match:
+            missing.append(f"расстояние между {dist_req_match.group(1)} и {dist_req_match.group(2)}")
+
         return missing
     
     def _create_subtasks(
         self, 
+        query: str,
         entities: List[str], 
         rules: List[str], 
         given: dict
@@ -331,66 +511,69 @@ class TaskDecomposer:
         """Create ordered subtasks based on problem structure."""
         subtasks = []
         task_id = 0
-        
-        # Subtask 1: Identify time context
+        # Step 1: Add LOOKUP tasks for missing facts ALWAYS
+        missing_data = self._identify_missing_data(query, given)
+        lookup_task_ids = []
+        for fact in missing_data:
+            # MARK volatile factual data (price, weather, distance etc)
+            volatile_kws = ["price", "цена", "курс", "rate", "weather", "погода", "btc", "bitcoin", "crypto", "расстояние", "distance"]
+            is_vol = any(kw in fact.lower() for kw in volatile_kws)
+            
+            subtasks.append(Subtask(
+                task_id=task_id,
+                task_type=SubtaskType.LOOKUP,
+                description=f"Search for: {fact}",
+                depends_on=[],
+                is_volatile=is_vol
+            ))
+            lookup_task_ids.append(task_id)
+            task_id += 1
+
+        # Step 2: Domain-specific Subtasks
+        # Subtasks for Charging Domain
+        charging_keywords = ["заряд", "квтч", "kwh", "станция", "charging"]
+        is_charging_task = any(k in " ".join(entities).lower() or k in query.lower() for k in charging_keywords)
+
+        if is_charging_task:
+            subtasks.append(Subtask(
+                task_id=task_id,
+                task_type=SubtaskType.CALCULATE,
+                description="Express charging costs as formulas",
+                depends_on=lookup_task_ids, # Wait for prices if needed
+                missing_data=["base_price_per_kwh"]
+            ))
+            task_id += 1
+            
+        # Step 3: Generic logic-math subtasks
+        # Analyze phase (depends on lookups)
         subtasks.append(Subtask(
             task_id=task_id,
-            task_type=SubtaskType.EXTRACT_DATA,
-            description="Determine if current time is within peak hours",
-            given_data={"time": given.get("current_time"), "peak": given.get("peak_hours")}
+            task_type=SubtaskType.REASON,
+            description="Analyze rules, conditions and retrieved data",
+            depends_on=lookup_task_ids # Wait for all lookups
         ))
+        reason_task_id = task_id
         task_id += 1
         
-        # Subtask 2: Apply priority rules
-        if any("priority" in r.lower() for r in rules):
-            subtasks.append(Subtask(
-                task_id=task_id,
-                task_type=SubtaskType.PRIORITIZE,
-                description="Identify priority vehicles (ambulance, police)",
-                depends_on=[0]
-            ))
-            task_id += 1
-        
-        # Subtask 3: Check discount eligibility for each entity
-        for entity in entities:
-            if "greenlog" in entity.lower():
-                subtasks.append(Subtask(
-                    task_id=task_id,
-                    task_type=SubtaskType.VALIDATE,
-                    description=f"Check if {entity} is eligible for discount (battery < threshold)",
-                    depends_on=[0],
-                    given_data={"battery": given.get("greenlog_battery"), "threshold": given.get("discount_threshold")}
-                ))
-                task_id += 1
-        
-        # Subtask 4: Allocate ports
-        if given.get("available_ports"):
-            subtasks.append(Subtask(
-                task_id=task_id,
-                task_type=SubtaskType.PRIORITIZE,
-                description=f"Allocate {given.get('available_ports')} ports based on priority",
-                depends_on=list(range(task_id))  # Depends on all previous
-            ))
-            task_id += 1
-        
-        # Subtask 5: Calculate costs (as formulas, not numbers!)
+        # CALCULATE MUST depend on REASON
         subtasks.append(Subtask(
             task_id=task_id,
             task_type=SubtaskType.CALCULATE,
-            description="Express charging costs as formulas (do NOT invent base price)",
-            depends_on=[task_id - 1] if task_id > 0 else [],
-            missing_data=["base_price_per_kwh"]
+            description="Perform final calculation based on determined values",
+            depends_on=[reason_task_id]
         ))
+        calc_task_id = task_id
         task_id += 1
         
-        # Subtask 6: Final answer
+        # Final answer MUST depend on CALCULATE
         subtasks.append(Subtask(
             task_id=task_id,
             task_type=SubtaskType.REASON,
             description="Compile final answer with queue order and cost formulas",
-            depends_on=[task_id - 1]
+            depends_on=[calc_task_id]
         ))
-        
+        task_id += 1
+            
         return subtasks
     
     def _extract_goal(self, query: str) -> str:

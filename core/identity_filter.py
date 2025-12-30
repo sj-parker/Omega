@@ -13,8 +13,7 @@ IDENTITY_PATTERNS = [
     r"(я|i)\s+(—|am|являюсь)\s+(языков\w+\s+модел\w+|language\s+model|an?\s+ai|искусственн\w+\s+интеллект\w*)",
     r"(as\s+an?\s+ai|как\s+ии|как\s+языковая\s+модель)",
     r"(i\'?m\s+an?\s+ai|i\s+am\s+an?\s+ai)",
-    # Company references
-    r"\b(alibaba|google|deepmind|meta|microsoft)\b",
+    # Company references are removed to allow source attribution (Google, etc.)
 ]
 
 # Phrases to remove entirely

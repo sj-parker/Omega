@@ -1,0 +1,1017 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Omega Advanced Monitoring</title>
+    <!-- Modern Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+    <!-- Mermaid.js for Architecture Graph -->
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+    <!-- SVG Pan Zoom -->
+    <script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
+
+    <style>
+        :root {
+            --bg: #0b0e14;
+            --surface: #151921;
+            --surface-hover: #1c222d;
+            --border: #2d333b;
+            --text: #e6edf3;
+            --text-muted: #8b949e;
+            --accent: #4f46e5;
+            --accent-glow: rgba(79, 70, 229, 0.4);
+            --success: #238636;
+            --warning: #d29922;
+            --danger: #f85149;
+            --panel-width: 320px;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            height: 100vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* --- Layout --- */
+        header {
+            height: 60px;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 1.5rem;
+            z-index: 100;
+        }
+
+        header h1 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            background: linear-gradient(45deg, #fff, var(--accent));
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .nav-tabs {
+            display: flex;
+            gap: 2rem;
+            height: 100%;
+        }
+
+        .nav-tab {
+            height: 100%;
+            display: flex;
+            align-items: center;
+            padding: 0 0.5rem;
+            cursor: pointer;
+            color: var(--text-muted);
+            font-weight: 500;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+        }
+
+        .nav-tab.active {
+            color: var(--text);
+            border-bottom-color: var(--accent);
+        }
+
+        main {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+        }
+
+        /* --- Sidebar (Request History) --- */
+        .history-sidebar {
+            width: var(--panel-width);
+            background: var(--surface);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .sidebar-header {
+            padding: 1rem;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05rem;
+            color: var(--text-muted);
+        }
+
+        .request-list {
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        .request-item {
+            padding: 1rem;
+            border-bottom: 1px solid var(--border);
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .request-item:hover {
+            background: var(--surface-hover);
+        }
+
+        .request-item.active {
+            background: var(--surface-hover);
+            border-left: 3px solid var(--accent);
+        }
+
+        .request-item h4 {
+            font-size: 0.9rem;
+            margin-bottom: 0.25rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .request-item .meta {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            display: flex;
+            justify-content: space-between;
+        }
+
+        /* --- Central Area --- */
+        .content-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+            overflow: hidden;
+            /* Ensure this doesn't expand beyond viewport */
+        }
+
+        /* --- Architecture Tab --- */
+        #tab-view-architecture {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            padding: 1rem;
+            position: relative;
+            overflow: hidden !important;
+            /* Force constraint */
+            min-height: 0;
+            /* Flexbox nested scroll fix */
+        }
+
+        .mermaid-container {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 12px;
+            overflow: hidden !important;
+            /* Strict overflow */
+            position: relative;
+            padding: 0;
+            min-height: 0;
+            /* Flexbox nested scroll fix */
+        }
+
+        #architecture-graph {
+            width: 100%;
+            height: auto;
+        }
+
+        /* Allow SVG to take its natural size */
+        .mermaid svg {
+            width: 100% !important;
+            height: 100% !important;
+            /* Changed from auto to 100% for pan-zoom container */
+            max-width: 100% !important;
+        }
+
+        /* Reset pre tag to prevent bars/scrollbars */
+        .mermaid-container pre.mermaid {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: transparent;
+            border: none;
+            display: flex;
+            /* Ensure SVG is centered if needed */
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* --- Controls --- */
+        .monitoring-controls {
+            position: fixed;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 50px;
+            padding: 0.5rem 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 1.5rem;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.8);
+            z-index: 9999;
+            pointer-events: auto;
+        }
+
+        .step-info {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            min-width: 150px;
+            text-align: center;
+        }
+
+        .control-btn {
+            background: none;
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 0.5rem 1rem;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            transition: all 0.2s;
+        }
+
+        .control-btn:hover:not(:disabled) {
+            background: var(--accent);
+            border-color: var(--accent);
+        }
+
+        .control-btn:disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
+        }
+
+        /* --- Details Panel --- */
+        .details-panel {
+            width: 400px;
+            background: var(--surface);
+            border-left: 1px solid var(--border);
+            padding: 1.5rem;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+        }
+
+        .details-section h3 {
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            color: var(--accent);
+            margin-bottom: 0.75rem;
+        }
+
+        .data-card {
+            background: #000;
+            border-radius: 8px;
+            padding: 0.75rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+            overflow-x: auto;
+            color: #d1d5db;
+        }
+
+        /* --- Chat Tab --- */
+        #tab-view-chat {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            padding: 2rem;
+            max-width: 1000px;
+            margin: 0 auto;
+            width: 100%;
+            height: 100%;
+        }
+
+        .messages-container {
+            flex: 1;
+            overflow-y: auto;
+            padding-right: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+        }
+
+        .msg {
+            max-width: 85%;
+            padding: 1rem 1.25rem;
+            border-radius: 16px;
+            line-height: 1.6;
+        }
+
+        .msg.user {
+            align-self: flex-end;
+            background: var(--accent);
+            color: white;
+            border-bottom-right-radius: 4px;
+        }
+
+        .msg.bot {
+            align-self: flex-start;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-bottom-left-radius: 4px;
+        }
+
+        .input-bar {
+            margin-top: 1.5rem;
+            display: flex;
+            gap: 1rem;
+        }
+
+        .input-bar input {
+            flex: 1;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1rem 1.5rem;
+            color: white;
+            font-size: 1rem;
+            outline: none;
+        }
+
+        .input-bar input:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px var(--accent-glow);
+        }
+
+        .input-bar button {
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 0 2rem;
+            border-radius: 12px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+
+        /* --- Highlights --- */
+        /* --- Highlights --- */
+        .highlight-node rect,
+        .highlight-node polygon,
+        .highlight-node path,
+        .highlight-node circle {
+            stroke: var(--accent) !important;
+            stroke-width: 4px !important;
+            filter: drop-shadow(0 0 15px var(--accent));
+            transition: all 0.3s ease;
+        }
+
+        /* --- Animations --- */
+        @keyframes pulse {
+            0% {
+                opacity: 0.6;
+            }
+
+            50% {
+                opacity: 1;
+            }
+
+            100% {
+                opacity: 0.6;
+            }
+        }
+
+        .active-step-badge {
+            display: inline-block;
+            padding: 0.2rem 0.5rem;
+            background: var(--accent);
+            color: white;
+            font-size: 0.7rem;
+            border-radius: 4px;
+            animation: pulse 2s infinite;
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <h1><span>Ω</span> OMEGA CORE</h1>
+        <div class="nav-tabs">
+            <div class="nav-tab active" onclick="switchTab('chat')">КОНСОЛЬ</div>
+            <div class="nav-tab" onclick="switchTab('architecture')">АРХИТЕКТУРА</div>
+        </div>
+        <div style="font-size: 0.8rem; color: var(--text-muted)" id="system-status">System: Online</div>
+    </header>
+
+    <main>
+        <div class="history-sidebar">
+            <div class="sidebar-header"
+                style="display:flex; justify-content:space-between; align-items:center; padding-right: 1rem;">
+                <span>МОИ ЗАПРОСЫ</span>
+                <div style="display: flex; gap: 0.5rem;">
+                    <button onclick="refreshHistoryList()"
+                        style="background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 1rem;"
+                        title="Обновить">🔄</button>
+                    <button onclick="resetView()"
+                        style="background: var(--surface-hover); border: 1px solid var(--border); color: var(--accent); cursor: pointer; font-size: 1.1rem; width: 24px; height: 24px; border-radius: 4px; display: flex; align-items: center; justify-content: center; line-height: 1;"
+                        title="Новый диалог">+</button>
+                </div>
+            </div>
+            <div class="request-list" id="request-list-user" style="flex: 1; min-height: 200px;">
+                <!-- User Requests -->
+            </div>
+
+            <div class="sidebar-header"
+                style="border-top: 1px solid var(--border); display:flex; justify-content:space-between; align-items:center; padding-right: 1rem;">
+                <span>Рефлексия Системы</span>
+                <button onclick="refreshHistoryList()"
+                    style="background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 1rem;"
+                    title="Обновить">🔄</button>
+            </div>
+            <div class="request-list" id="request-list-system" style="flex: 1; background: rgba(0,0,0,0.2);">
+                <!-- System Reflections -->
+            </div>
+        </div>
+
+        <div class="content-area">
+            <!-- ARCHITECTURE TAB -->
+            <div id="tab-view-architecture" style="display: none;">
+                <div class="mermaid-container">
+                    <pre class="mermaid" id="architecture-mermaid">
+graph TD
+    NodeUser[User Input] --> NodeGatekeeper
+    NodeGatekeeper{{Gatekeeper}} -->|identity| NodeContextManager
+    NodeContextManager[(Context Manager)] -->|slice| NodeOM{Operational Module}
+
+    NodeOM --> NodeIntentRouter[Intent Router]
+    NodeOM --> NodeTaskDecomposer[Task Decomposer]
+    NodeOM --> NodeSimEngine[Simulation Engine]
+    NodeOM --> NodeInfoBroker[Info Broker]
+
+    NodeIntentRouter -.-> NodeExperts
+    NodeTaskDecomposer -.-> NodeExperts
+    NodeSimEngine -.-> NodeExperts
+    NodeInfoBroker -.-> NodeExperts
+    
+    NodeOM --> NodeExperts
+
+    subgraph NodeExperts [Experts Reasoning Cluster]
+        direction TB
+        NodeExpNeutral[Neutral Expert]
+        NodeExpCreative[Creative Expert]
+        NodeExpConservative[Conservative Expert]
+        NodeExpAdversarial[Adversarial Expert]
+        NodeExpForecaster[Forecaster]
+        NodeExpPhysics[Physics Expert]
+        
+        NodeExpNeutral --- NodeToolCaller[Tool Caller]
+        NodeToolCaller --- NodeToolReg[Tools Registry]
+    end
+
+    NodeExperts --> NodeCritic[Critic / CoVe]
+    NodeCritic --> NodeSanitizer[Sanitizer]
+    NodeSanitizer --> NodeResponse[Final Response]
+
+    NodeResponse -->|trace| NodeLearning[Learning Decoder]
+    NodeLearning --> NodeReflection[Reflection]
+    NodeReflection --> NodeHomeostasis[Homeostasis]
+    NodeHomeostasis -->|policy| NodeOM
+
+    style NodeGatekeeper fill:#30363d,stroke:#58a6ff
+    style NodeContextManager fill:#30363d,stroke:#58a6ff
+    style NodeOM fill:#1a1d23,stroke:#ff7b72,stroke-width:2px
+    style NodeExperts fill:#1a1d23,stroke:#d29922,stroke-width:2px
+    style NodeExpNeutral fill:#111217,stroke:#d29922
+    style NodeExpCreative fill:#111217,stroke:#d29922
+    style NodeExpConservative fill:#111217,stroke:#d29922
+    style NodeExpAdversarial fill:#111217,stroke:#d29922
+    style NodeExpForecaster fill:#111217,stroke:#d29922
+    style NodeExpPhysics fill:#111217,stroke:#d29922
+    style NodeLearning fill:#151921,stroke:#3fb950,stroke-dasharray: 5 5
+    style NodeResponse fill:#3fb950,color:#fff
+                    </pre>
+                </div>
+
+                <div class="monitoring-controls">
+                    <button class="control-btn" id="btn-prev" onclick="prevStep()" disabled>&larr; Назад</button>
+                    <div class="step-info" id="step-info">Выберите запрос</div>
+                    <button class="control-btn" id="btn-next" onclick="nextStep()" disabled>Вперед &rarr;</button>
+                </div>
+            </div>
+
+            <!-- CHAT TAB -->
+            <div id="tab-view-chat">
+                <div class="messages-container" id="chat-messages">
+                    <div class="msg bot">Приветствую. Я Омега. Жду вашего запроса для анализа.</div>
+                </div>
+                <div class="input-bar">
+                    <input type="text" id="chat-input" placeholder="Введите ваш промпт здесь..." autocomplete="off">
+                    <button onclick="sendChat()">ОТПРАВИТЬ</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Details Sidebar -->
+        <div class="details-panel" id="details-panel">
+            <div id="details-welcome">
+                <h3 style="margin-top: 2rem; color: var(--text-muted); text-align: center;">Выберите шаг для
+                    просмотра
+                    деталей</h3>
+            </div>
+
+            <div id="details-content" style="display: none;">
+                <div class="details-section">
+                    <h3>Модуль</h3>
+                    <div id="detail-module" style="font-weight: 600; font-size: 1.1rem">OperationalModule</div>
+                </div>
+
+                <div class="details-section">
+                    <h3>Действие</h3>
+                    <div id="detail-action" style="color: var(--warning)">Intent Classification</div>
+                </div>
+
+                <div class="details-section">
+                    <h3>Описание</h3>
+                    <p id="detail-desc" style="font-size: 0.9rem; line-height: 1.4; color: var(--text-muted)">Анализ
+                        входящего сообщения для определения глубины планирования...</p>
+                </div>
+
+                <div class="details-section" id="section-data-in">
+                    <h3>Входящие данные</h3>
+                    <div class="data-card" id="detail-data-in">{}</div>
+                </div>
+
+                <div class="details-section" id="section-data-out">
+                    <h3>Результат</h3>
+                    <div class="data-card" id="detail-data-out">{}</div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        let currentTrace = null;
+        let currentStepIndex = -1;
+        let activeTab = 'chat';
+
+        // --- Tab Switching ---
+        function switchTab(tab) {
+            activeTab = tab;
+            document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+            document.querySelector(`.nav-tab[onclick="switchTab('${tab}')"]`).classList.add('active');
+
+            const chatView = document.getElementById('tab-view-chat');
+            const archView = document.getElementById('tab-view-architecture');
+
+            if (tab === 'chat') {
+                chatView.style.display = 'flex';
+                archView.style.display = 'none';
+            } else {
+                chatView.style.display = 'none';
+                archView.style.display = 'flex';
+                // Trigger history refresh
+                refreshHistoryList();
+                // Trigger Mermaid render when tab becomes visible
+                setTimeout(async () => {
+                    const mermaidEl = document.getElementById('architecture-mermaid');
+                    // Reset if needed (though mermaid.run normally handles it)
+
+                    await mermaid.run({
+                        nodes: [mermaidEl]
+                    });
+
+                    // Initialize Pan Zoom
+                    const svg = document.querySelector('.mermaid svg');
+                    if (svg) {
+                        // Ensure SVG takes full size for pan-zoom
+                        svg.style.height = '100%';
+                        svg.style.width = '100%';
+
+                        // Destroy previous instance if exists (stored on element)
+                        if (window.panZoomInstance) {
+                            window.panZoomInstance.destroy();
+                        }
+
+                        window.panZoomInstance = svgPanZoom(svg, {
+                            zoomEnabled: true,
+                            controlIconsEnabled: true,
+                            fit: true,
+                            center: true,
+                            contain: false, // Explicitly allow panning outside view
+                            minZoom: 0.1,
+                            maxZoom: 10
+                        });
+
+                        // Force a resize update
+                        window.panZoomInstance.resize();
+                        window.panZoomInstance.fit();
+                        window.panZoomInstance.center();
+                    }
+                }, 100);
+            }
+        }
+
+        // --- Chat Functions ---
+        async function sendChat() {
+            const input = document.getElementById('chat-input');
+            const text = input.value.trim();
+            if (!text) return;
+
+            addMsg(text, 'user');
+            input.value = '';
+
+            try {
+                const res = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: text })
+                });
+                const data = await res.json();
+                addMsg(data.response, 'bot');
+                loadRequests(); // Refresh history
+            } catch (e) {
+                addMsg('Error: ' + e.message, 'bot');
+            }
+        }
+
+        function addMsg(text, type) {
+            const container = document.getElementById('chat-messages');
+            const div = document.createElement('div');
+            div.className = `msg ${type}`;
+            div.textContent = text;
+            container.appendChild(div);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        // --- History Loader ---
+        async function loadRequests() {
+            const res = await fetch('/api/stats');
+            const data = await res.json();
+            // Refresh list
+            refreshHistoryList();
+        }
+
+        async function refreshHistoryList() {
+            const containerUser = document.getElementById('request-list-user');
+            const containerSystem = document.getElementById('request-list-system');
+
+            if (!containerUser || !containerSystem) return;
+
+            // Prevent flickering: only show loading if empty
+            if (containerUser.children.length === 0 && containerSystem.children.length === 0) {
+                // only show loading on initial load
+                // containerUser.innerHTML = '<div style="padding:1rem; color:#666">Загрузка...</div>';
+            }
+
+            try {
+                // Fetch full history
+                const res = await fetch('/api/lifecycle/history');
+                if (res.ok) {
+                    const history = await res.json();
+
+                    if (history && history.length > 0) {
+                        containerUser.innerHTML = '';
+                        containerSystem.innerHTML = '';
+
+                        // Reverse to show newest first
+                        history.reverse().forEach(item => {
+                            const isReflection = (item.key_metrics && (item.key_metrics.depth === 'reflection')) ||
+                                (item.summary && item.summary.startsWith("System Reflection"));
+
+                            const isSuccess = item.outcome === 'success';
+                            let statusColor = isSuccess ? 'var(--success)' : 'var(--warning)';
+
+                            // Special styling for reflections
+                            let icon = '';
+                            if (isReflection) {
+                                statusColor = 'var(--accent)';
+                                icon = '🧠 ';
+                            }
+
+                            const div = document.createElement('div');
+                            div.className = 'request-item';
+                            if (isReflection) div.style.borderLeftColor = 'var(--accent)';
+
+                            const id = item.episode_id || item.trace_id;
+
+                            // Check if this is the currently selected trace
+                            if (currentTrace && (currentTrace.episode_id === id)) {
+                                div.classList.add('active');
+                            }
+
+                            div.onclick = () => selectTrace(id);
+
+                            div.innerHTML = `
+                                <h4>${icon}${item.summary || 'Без названия'}</h4>
+                                <div class="meta">
+                                    <span>${isReflection ? 'SYSTEM' : 'USER'}</span>
+                                    <span style="color: ${statusColor}">${item.outcome || 'check'}</span>
+                                </div>
+                            `;
+
+                            if (isReflection) {
+                                containerSystem.appendChild(div);
+                            } else {
+                                containerUser.appendChild(div);
+                            }
+                        });
+
+                        if (containerUser.children.length === 0) containerUser.innerHTML = '<div style="padding:1rem; color:#666">Нет запросов</div>';
+                        if (containerSystem.children.length === 0) containerSystem.innerHTML = '<div style="padding:1rem; color:#666">Нет рефлексии</div>';
+
+                    } else {
+                        containerUser.innerHTML = '<div style="padding:1rem; color:#666">История пуста</div>';
+                        containerSystem.innerHTML = '';
+                    }
+                } else {
+                    containerUser.innerHTML = '<div style="padding:1rem; color:#666">Ошибка загрузки</div>';
+                }
+            } catch (e) {
+                console.error(e);
+                containerUser.innerHTML = '<div style="padding:1rem; color:#666">Ошибка сети</div>';
+            }
+        }
+
+        // --- Tracing Engine ---
+        async function selectTrace(id) {
+            document.querySelectorAll('.request-item').forEach(i => i.classList.remove('active'));
+            currentStepIndex = -1;
+
+            try {
+                const res = await fetch(`/api/lifecycle/${id}`);
+                currentTrace = await res.json();
+
+                document.getElementById('step-info').textContent = `Загружено шагов: ${currentTrace.steps.length}`;
+                document.getElementById('btn-next').disabled = false;
+                document.getElementById('btn-prev').disabled = true;
+
+                // Stop forced switching. User can switch manually if they want.
+                // if (activeTab !== 'architecture') switchTab('architecture');
+
+                resetHighlights();
+
+                // Sync Chat Window
+                const chatContainer = document.getElementById('chat-messages');
+                if (chatContainer) {
+                    chatContainer.innerHTML = ''; // Clear current
+                    // Add User Message
+                    if (currentTrace.user_input) {
+                        const div = document.createElement('div');
+                        div.className = 'msg user';
+                        div.textContent = currentTrace.user_input;
+                        chatContainer.appendChild(div);
+                    }
+                    // Add Bot Response
+                    if (currentTrace.final_response) {
+                        const div = document.createElement('div');
+                        div.className = 'msg bot';
+                        div.textContent = currentTrace.final_response;
+                        chatContainer.appendChild(div);
+                    }
+                }
+
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        function nextStep() {
+            if (!currentTrace || currentStepIndex >= currentTrace.steps.length - 1) return;
+            currentStepIndex++;
+            updateStepView();
+        }
+
+        function prevStep() {
+            if (!currentTrace || currentStepIndex <= 0) return;
+            currentStepIndex--;
+            updateStepView();
+        }
+
+        function updateStepView() {
+            const step = currentTrace.steps[currentStepIndex];
+
+            // Update Text
+            document.getElementById('step-info').textContent = `Шаг ${currentStepIndex + 1} из ${currentTrace.steps.length}`;
+            document.getElementById('btn-prev').disabled = currentStepIndex <= 0;
+            document.getElementById('btn-next').disabled = currentStepIndex >= currentTrace.steps.length - 1;
+
+            // Update Details
+            document.getElementById('details-welcome').style.display = 'none';
+            document.getElementById('details-content').style.display = 'block';
+
+            document.getElementById('detail-module').textContent = step.module;
+            document.getElementById('detail-action').textContent = step.name;
+            document.getElementById('detail-desc').textContent = step.description;
+
+            const dataIn = document.getElementById('detail-data-in');
+            const dataOut = document.getElementById('detail-data-out');
+
+            if (step.data_in) {
+                document.getElementById('section-data-in').style.display = 'block';
+                dataIn.textContent = JSON.stringify(step.data_in, null, 2);
+            } else {
+                document.getElementById('section-data-in').style.display = 'none';
+            }
+
+            if (step.data_out) {
+                document.getElementById('section-data-out').style.display = 'block';
+                dataOut.textContent = JSON.stringify(step.data_out, null, 2);
+            } else {
+                document.getElementById('section-data-out').style.display = 'none';
+            }
+
+            // Update Graph Highlight
+            highlightModule(step.module);
+        }
+
+        function highlightModule(moduleId) {
+            resetHighlights();
+
+            // Map step module names to mermaid IDs
+            const moduleMap = {
+                // Core
+                'gatekeeper': 'Gatekeeper',
+                'context_manager': 'Context Manager',
+                'operational_module': 'Operational Module',
+                'om': 'Operational Module',
+
+                // Decision Engine
+                'intent_router': 'Intent Router',
+                'intent_classification': 'Intent Router',
+                'task_decomposer': 'Task Decomposer',
+                'simulation_engine': 'Simulation Engine',
+                'info_broker': 'Info Broker',
+
+                // Experts
+                'experts_module': 'Experts Reasoning Cluster',
+                'expert_neutral': 'Neutral Expert',
+                'expert_creative': 'Creative Expert',
+                'expert_conservative': 'Conservative Expert',
+                'expert_adversarial': 'Adversarial Expert',
+                'expert_forecaster': 'Forecaster',
+                'expert_physics': 'Physics Expert',
+
+                // Tools & Registry (internal to experts)
+                'tool_caller': 'Tool Caller',
+                'tools_registry': 'Tools Registry',
+
+                // Output & Learning
+                'critic': 'Critic',
+                'sanitizer': 'Sanitizer',
+                'final_response': 'Response',
+                'response_generator': 'Response',
+                'learning_decoder': 'Learning',
+                'reflection': 'Reflection',
+                'homeostasis': 'Homeostasis'
+            };
+
+            let targetId = moduleMap[moduleId.toLowerCase()];
+            if (!targetId) {
+                console.warn(`[Highlight] No map found for module: '${moduleId}'. Using raw ID.`);
+                targetId = moduleId;
+            }
+
+            // Normalize function for fuzzy matching
+            const normalize = (str) => str.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+            const targetNormalized = normalize(targetId);
+
+            // Try to find the rect in SVG and add class
+            const svg = document.querySelector('.mermaid svg');
+            if (svg) {
+                const nodes = svg.querySelectorAll('.node');
+                let found = false;
+
+                nodes.forEach(node => {
+                    // Get text content and normalize
+                    const nodeText = normalize(node.textContent);
+
+                    // Check if normalized node text contains normalized target ID
+                    // OR if target ID contains node text (for short labels)
+                    if (!found && (nodeText.includes(targetNormalized) || targetNormalized.includes(nodeText))) {
+                        node.classList.add('highlight-node');
+                        found = true;
+
+                        // Smart Panning using svg-pan-zoom
+                        // Logic: "Smart Center" - if off-screen, move to CENTER. If on-screen, do nothing.
+                        if (window.panZoomInstance) {
+                            try {
+                                const nodeRect = node.getBoundingClientRect();
+                                const container = document.querySelector('.mermaid-container');
+                                const containerRect = container.getBoundingClientRect();
+                                const padding = 60; // Margin to determine if "off-screen"
+
+                                let shouldPan = false;
+
+                                // Check if node is effectively off-screen
+                                if (nodeRect.left < containerRect.left + padding ||
+                                    nodeRect.right > containerRect.right - padding ||
+                                    nodeRect.top < containerRect.top + padding ||
+                                    nodeRect.bottom > containerRect.bottom - padding) {
+                                    shouldPan = true;
+                                }
+
+                                if (shouldPan) {
+                                    // Calculate delta to Center the node
+                                    const nodeCx = nodeRect.left + nodeRect.width / 2;
+                                    const nodeCy = nodeRect.top + nodeRect.height / 2;
+                                    const containerCx = containerRect.left + containerRect.width / 2;
+                                    const containerCy = containerRect.top + containerRect.height / 2;
+
+                                    const dx = containerCx - nodeCx;
+                                    const dy = containerCy - nodeCy;
+
+                                    const zoom = window.panZoomInstance.getZoom();
+                                    const adjustedDx = dx / zoom;
+                                    const adjustedDy = dy / zoom;
+
+                                    console.log(`[SmartCenter] Panning to center. Delta:(${adjustedDx | 0}, ${adjustedDy | 0})`);
+                                    window.panZoomInstance.panBy({ x: adjustedDx, y: adjustedDy });
+                                }
+
+                            } catch (e) {
+                                console.error("Auto-pan error:", e);
+                            }
+                        }
+                    }
+                });
+
+                if (!found) {
+                    console.log(`[Highlight] Could not find node for '${targetId}' (Normalized: '${targetNormalized}')`);
+                    // Fallback: log available nodes to help debugging
+                    // nodes.forEach(n => console.log(`Available: ${normalize(n.textContent)}`));
+                }
+            }
+        }
+
+        function resetView() {
+            currentTrace = null;
+            currentStepIndex = -1;
+
+            // Clear active selection in sidebar
+            document.querySelectorAll('.request-item').forEach(i => i.classList.remove('active'));
+
+            // Reset Chat Window
+            const chatContainer = document.getElementById('chat-messages');
+            if (chatContainer) {
+                chatContainer.innerHTML = '<div class="msg bot">Приветствую. Я Омега. Жду вашего запроса для анализа.</div>';
+            }
+
+            // Reset Architecture highlights
+            resetHighlights();
+
+            // Switch to chat tab if not already
+            if (activeTab !== 'chat') switchTab('chat');
+        }
+
+        function resetHighlights() {
+            document.querySelectorAll('.highlight-node').forEach(n => n.classList.remove('highlight-node'));
+        }
+
+        // Initial Load
+        window.onload = () => {
+            loadRequests();
+            // Auto-refresh much less frequently (e.g., every 60 seconds)
+            setInterval(refreshHistoryList, 60000);
+        };
+
+        // Handle enter key in chat
+        document.getElementById('chat-input').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendChat();
+        });
+
+    </script>
+    <script>
+        // Disable auto-load to prevent rendering in hidden div
+        mermaid.initialize({
+            startOnLoad: false,
+            theme: 'dark',
+            securityLevel: 'loose',
+            flowchart: {
+                useMaxWidth: false,
+                htmlLabels: true
+            }
+        });
+
+        // Add zoom capability via simple mouse events (optional but helpful)
+        // or just rely on the CSS scaling
+    </script>
+</body>
+
+</html>

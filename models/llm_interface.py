@@ -1,8 +1,10 @@
 # LLM Interface - Abstract wrapper for any LLM backend
 
-from abc import ABC, abstractmethod
-from typing import Optional
+import asyncio
 import os
+import json
+from abc import ABC, abstractmethod
+from typing import Optional, List
 
 
 class LLMInterface(ABC):
@@ -14,7 +16,8 @@ class LLMInterface(ABC):
         prompt: str,
         system_prompt: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: int = 1024
+        max_tokens: int = 1024,
+        stop: Optional[List[str]] = None
     ) -> str:
         """Generate a response from the LLM."""
         pass
@@ -28,7 +31,8 @@ class MockLLM(LLMInterface):
         prompt: str,
         system_prompt: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: int = 1024
+        max_tokens: int = 1024,
+        stop: Optional[List[str]] = None
     ) -> str:
         # Simple mock response based on prompt
         if "expert" in (system_prompt or "").lower():
@@ -93,14 +97,15 @@ class LLMRouter(LLMInterface):
         prompt: str,
         system_prompt: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: int = 1024
+        max_tokens: int = 1024,
+        stop: Optional[List[str]] = None
     ) -> str:
         if self._current_mode == "fast":
             self.fast_calls += 1
-            response = await self.fast_llm.generate(prompt, system_prompt, temperature, max_tokens)
+            response = await self.fast_llm.generate(prompt, system_prompt, temperature, max_tokens, stop)
         else:
             self.main_calls += 1
-            response = await self.main_llm.generate(prompt, system_prompt, temperature, max_tokens)
+            response = await self.main_llm.generate(prompt, system_prompt, temperature, max_tokens, stop)
         return self._filter_response(response)
     
     async def generate_fast(
@@ -108,11 +113,12 @@ class LLMRouter(LLMInterface):
         prompt: str,
         system_prompt: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: int = 512
+        max_tokens: int = 512,
+        stop: Optional[List[str]] = None
     ) -> str:
         """Explicitly use fast LLM."""
         self.fast_calls += 1
-        response = await self.fast_llm.generate(prompt, system_prompt, temperature, max_tokens)
+        response = await self.fast_llm.generate(prompt, system_prompt, temperature, max_tokens, stop)
         return self._filter_response(response)
     
     async def generate_main(
@@ -120,11 +126,12 @@ class LLMRouter(LLMInterface):
         prompt: str,
         system_prompt: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: int = 1024
+        max_tokens: int = 1024,
+        stop: Optional[List[str]] = None
     ) -> str:
         """Explicitly use main LLM (for quality-critical tasks)."""
         self.main_calls += 1
-        response = await self.main_llm.generate(prompt, system_prompt, temperature, max_tokens)
+        response = await self.main_llm.generate(prompt, system_prompt, temperature, max_tokens, stop)
         return self._filter_response(response)
     
     def get_stats(self) -> dict:
@@ -149,17 +156,18 @@ class OllamaLLM(LLMInterface):
         prompt: str,
         system_prompt: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: int = 1024
+        max_tokens: int = 1024,
+        stop: Optional[List[str]] = None
     ) -> str:
         import aiohttp
         
         # Try /api/chat first (newer format)
         try:
-            return await self._chat_api(prompt, system_prompt, temperature, max_tokens)
+            return await self._chat_api(prompt, system_prompt, temperature, max_tokens, stop)
         except Exception as e:
             if "400" in str(e) or "404" in str(e):
                 # Fallback to /api/generate (older format)
-                return await self._generate_api(prompt, system_prompt, temperature, max_tokens)
+                return await self._generate_api(prompt, system_prompt, temperature, max_tokens, stop)
             raise
     
     async def _chat_api(
@@ -167,7 +175,8 @@ class OllamaLLM(LLMInterface):
         prompt: str,
         system_prompt: Optional[str],
         temperature: float,
-        max_tokens: int
+        max_tokens: int,
+        stop: Optional[List[str]]
     ) -> str:
         import aiohttp
         
@@ -176,14 +185,18 @@ class OllamaLLM(LLMInterface):
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
         
+        options = {
+            "temperature": temperature,
+            "num_predict": max_tokens
+        }
+        if stop:
+            options["stop"] = stop
+            
         payload = {
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "options": {
-                "temperature": temperature,
-                "num_predict": max_tokens
-            }
+            "options": options
         }
         
         async with aiohttp.ClientSession() as session:
@@ -203,7 +216,8 @@ class OllamaLLM(LLMInterface):
         prompt: str,
         system_prompt: Optional[str],
         temperature: float,
-        max_tokens: int
+        max_tokens: int,
+        stop: Optional[List[str]]
     ) -> str:
         import aiohttp
         
@@ -211,14 +225,18 @@ class OllamaLLM(LLMInterface):
         if system_prompt:
             full_prompt = f"{system_prompt}\n\n{prompt}"
         
+        options = {
+            "temperature": temperature,
+            "num_predict": max_tokens
+        }
+        if stop:
+            options["stop"] = stop
+            
         payload = {
             "model": self.model,
             "prompt": full_prompt,
             "stream": False,
-            "options": {
-                "temperature": temperature,
-                "num_predict": max_tokens
-            }
+            "options": options
         }
         
         async with aiohttp.ClientSession() as session:
@@ -246,7 +264,8 @@ class OpenAILLM(LLMInterface):
         prompt: str,
         system_prompt: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: int = 1024
+        max_tokens: int = 1024,
+        stop: Optional[List[str]] = None
     ) -> str:
         import aiohttp
         
@@ -261,6 +280,8 @@ class OpenAILLM(LLMInterface):
             "temperature": temperature,
             "max_tokens": max_tokens
         }
+        if stop:
+            payload["stop"] = stop
         
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -299,205 +320,73 @@ class FunctionGemmaLLM(LLMInterface):
         self,
         prompt: str,
         system_prompt: Optional[str] = None,
-        temperature: float = 0.0,  # Zero temp for precise tool calls
-        max_tokens: int = 512
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        stop: Optional[List[str]] = None
     ) -> str:
-        """Generate a tool call (or text response)."""
         import aiohttp
         
-        # Qwen prefers explicit system prompts
-        if not system_prompt:
-            system_prompt = "You are a helpful assistant that outputs only JSON."
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        
+        options = {
+            "temperature": temperature,
+            "num_predict": max_tokens
+        }
+        if stop:
+            options["stop"] = stop
             
         payload = {
             "model": self.model,
-            "prompt": prompt,
-            "system": system_prompt,
+            "messages": messages,
             "stream": False,
-            "temperature": temperature,
-            "options": {
-                "num_predict": max_tokens,
-                "stop": ["<|endoftext|>", "<|im_end|>"]
-            },
-            "format": "json"  # Native JSON mode for Qwen
+            "options": options
         }
         
         async with aiohttp.ClientSession() as session:
-            try:
-                # Use /api/generate instead of /api/chat for better raw control
-                async with session.post(f"{self.base_url}/api/generate", json=payload) as resp:
-                    if resp.status == 200:
-                        result = await resp.json()
-                        return result.get("response", "")
-                    else:
-                        error_text = await resp.text()
-                        print(f"Error calling {self.model}: {error_text}")
-                        return "{}"
-            except Exception as e:
-                print(f"Connection error to {self.model}: {e}")
-                return "{}"
-        
+            async with session.post(
+                f"{self.base_url}/api/chat",
+                json=payload
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("message", {}).get("content", "")
+                else:
+                    error_text = await resp.text()
+                    raise Exception(f"Ollama chat error {resp.status}: {error_text[:200]}")
 
-    
-    async def call_tool(
-        self,
-        task_description: str,
-        tools: list[dict],
-        context: str = ""
-    ) -> Optional[dict]:
+    async def call_tool(self, prompt: str, tools: list[dict] = None) -> Optional[dict]:
         """
-        High-level method: given a task, return the appropriate tool call.
-        Returns dict with 'tool' and 'arguments', or None if no tool needed.
+        Force the model to return a tool call in JSON format.
         """
-        # ═══════════════════════════════════════════════════════════════
-        # FIX 1: Filter invalid "None" queries from experts
-        # ═══════════════════════════════════════════════════════════════
-        if not task_description or task_description.lower().strip() in ["none", "none.", "n/a", ""]:
-            print(f"[FunctionGemma] BLOCKED: Invalid task description '{task_description}'")
-            return None
+        actual_tools = tools if tools is not None else self._tools
         
-        # ═══════════════════════════════════════════════════════════════
-        # FIX 2: Direct math detection - bypass LLM entirely for simple math
-        # ═══════════════════════════════════════════════════════════════
-        import re
-        math_match = re.search(r"(\d+(?:\.\d+)?)\s*[\*\×x]\s*(\d+(?:\.\d+)?)", task_description)
-        if math_match:
-            # Simple multiplication - return calculate result directly
-            a, b = float(math_match.group(1)), float(math_match.group(2))
-            result = a * b
-            print(f"[FunctionGemma] MATH BYPASS: {a} × {b} = {result}")
-            # Return a pseudo-observation so experts can use it
-            return {"tool": "direct_calculation", "arguments": {"result": result, "expression": f"{a} × {b}"}}
-        
-        # ═══════════════════════════════════════════════════════════════
-        # FIX 3: Block impossible calculation requests
-        # ═══════════════════════════════════════════════════════════════
-        IMPOSSIBLE_CALC_PATTERNS = [
-            r"probability", r"вероятност", r"ймовірност",
-            r"correlation", r"корреляц", r"кореляц",
-            r"analyze", r"аналіз", r"анализ",
-            r"assess", r"оценить", r"оцінити"
-        ]
-        task_lower = task_description.lower()
-        if any(re.search(p, task_lower) for p in IMPOSSIBLE_CALC_PATTERNS):
-            if "calculate" in task_lower or "compute" in task_lower or "вычисл" in task_lower:
-                print(f"[FunctionGemma] BLOCKED: Impossible calculation request (probability/correlation/analyze)")
-                return None
-        
-        # Cleanup: Experts improperly use snake_case
-        task_description = task_description.replace("_", " ")
-        
-        # FIX: Strip "search" prefix that experts often add
-        import re
-        task_description = re.sub(r"^search\s+", "", task_description, flags=re.IGNORECASE)
-        task_description = re.sub(r"^find\s+", "", task_description, flags=re.IGNORECASE)
-        
-        # STRICT TOOL FILTERING (Code Surgery)
-        # We explicitly restricting the tools available to the LLM based on keywords.
-        # This prevents "search for calculation" errors.
-        
-        filtered_tools = tools # Default: all tools
-        forced_instruction = "" # Initialize variable
-        
-        key_task = task_description.lower()
-        
-        
-        # 1. Calculation Intent (Check FIRST to avoid "what" masking it)
-        if any(w in key_task for w in ["calculate", "compute", "drain", "charge", "linear", "rate"]):
-             # Keep calculate AND search tools (Fallback mechanism for complex math/puzzles)
-             filtered_tools = [t for t in tools if "calculate" in t['function']['name'] or "search" in t['function']['name']]
-             forced_instruction = '\nCONSTRAINT: Use "calculate_*" tools ONLY for linear rates. For puzzles, probability, or complex math, use "search_and_extract".'
-             print(f"[QwenTool] Strict Filter: Intent=CALCULATION. Tools: {[t['function']['name'] for t in filtered_tools]}")
+        system_msg = """You are a function caller. 
+Given a user request and a list of tools, you MUST return ONLY a JSON object matching the ToolCall schema.
+Do NOT explain. Do NOT say anything else.
 
-        # 2. Search Intent (Only if NOT calculation)
-        elif any(w in key_task for w in ["search", "find", "limit", "price", "weather", "verify", "check", "news", "current"]):
-             search_tools = [t for t in tools if t.get('function', {}).get('name') in ['search_and_extract', 'verify_fact']]
-             filtered_tools = search_tools
-             forced_instruction = "CONSTRAINT: You MUST use 'search_and_extract' or 'verify_fact'. Do NOT calculate."
-             print(f"[QwenTool] Strict Filter: Intent=SEARCH. Tools: {[t.get('function', {}).get('name') for t in filtered_tools]}")
-             
-
-        self.set_tools(filtered_tools)
+Schema:
+{
+  "tool": "name_of_tool",
+  "arguments": { ... }
+}
+"""
+        tools_str = json.dumps(actual_tools, indent=2, ensure_ascii=False)
+        full_prompt = f"Available Tools:\n{tools_str}\n\nTask: {prompt}"
         
-        # Enhanced prompt for Qwen: Provide tools definition and ask for JSON
-        tools_def = [t.get('function') for t in filtered_tools]
-        import json
-        
-        prompt = f"""You are a tool calling assistant. Given a task, select the best tool and providing arguments in JSON format.
-
-Task: {task_description}
-
-Available Tools:
-{json.dumps(tools_def, indent=2)}
-
-{f"Context: {context}" if context else ""}
-
-IMPORTANT RULES:
-1. Return ONLY the JSON object.
-2. For current data (weather, prices) use "search_and_extract".
-3. For calculations use "calculate_linear_change" ONLY if applicable.
-4. If no tool fits, return {{"tool": "none", "arguments": {{}}}}
-
-{forced_instruction}
-
-Respond with JSON ONLY:"""
-
-        response = await self.generate(prompt, temperature=0.0)
-
+        raw_json = await self.generate(full_prompt, system_msg, temperature=0.0)
         
         try:
-            import json
-            data = json.loads(response)
+            # Clean up potential markdown formatting
+            clean_json = raw_json.strip()
+            if clean_json.startswith("```json"):
+                clean_json = clean_json[7:]
+            if clean_json.endswith("```"):
+                clean_json = clean_json[:-3]
             
-            # HALLUCINATION DETECTION: Check if query is relevant to task
-            if data.get("tool") == "search_and_extract":
-                query = data.get("arguments", {}).get("query", "").lower()
-                task_lower = task_description.lower()
-                
-                # Known hallucination patterns (expanded)
-                HALLUCINATION_PHRASES = [
-                    "weather london", "weather berlin", "weather", "current weather", 
-                    "check weather", "real-time weather", "погода",
-                    "search_and_extract", "search for real-time", "search me for",
-                    "apple stock", "stock price"
-                ]
-                
-                # Check for explicit hallucination phrases
-                is_known_hallucination = any(phrase in query for phrase in HALLUCINATION_PHRASES)
-                
-                # Check if task mentions these topics legitimately
-                WEATHER_KEYWORDS = ["weather", "погода", "london", "лондон", "berlin", "берлін", "temperature", "температура"]
-                STOCK_KEYWORDS = ["stock", "акці", "apple", "price", "ціна", "курс"]
-                
-                task_is_about_weather = any(w in task_lower for w in WEATHER_KEYWORDS)
-                task_is_about_stocks = any(w in task_lower for w in STOCK_KEYWORDS)
-                
-                # IMPROVED Semantic relevance check
-                # Extract meaningful words (>3 chars, not common stopwords)
-                STOPWORDS = {"the", "and", "for", "that", "this", "with", "from", "search", "find", "about"}
-                task_words = set(w for w in task_lower.split() if len(w) > 3 and w not in STOPWORDS)
-                query_words = set(w for w in query.split() if len(w) > 3 and w not in STOPWORDS)
-                shared_words = task_words & query_words
-                
-                # Must have NO shared words AND task must have enough context to compare
-                is_semantically_irrelevant = len(shared_words) == 0 and len(task_words) > 3
-                
-                # FIX: Don't flag as hallucination if query is clearly derived from task
-                query_in_task = query in task_lower or task_lower in query
-                
-                if (is_known_hallucination and not task_is_about_weather and not task_is_about_stocks) and not query_in_task:
-                    print(f"[FunctionGemma] HALLUCINATION DETECTED: '{query[:50]}' unrelated to '{task_description[:50]}'")
-                    # Fallback: use task description as query
-                    return {"tool": "search_and_extract", "arguments": {"query": task_description}}
-            
-            # HEALING: If model returns raw args {"start":...} without "tool" wrapper
-            if isinstance(data, dict) and "tool" not in data:
-                 if len(filtered_tools) == 1:
-                      guessed_tool = filtered_tools[0]['function']['name']
-                      print(f"[FunctionGemma] JSON HEALING: Wrapping raw args for {guessed_tool}")
-                      return {"tool": guessed_tool, "arguments": data}
-            
-            return data
+            return json.loads(clean_json.strip())
         except:
+            print(f"[ToolCaller] Failed to parse JSON: {raw_json}")
             return None
-

@@ -9,122 +9,69 @@ import json
 from models.schemas import ExpertResponse, PolicySpace, CriticAnalysis, WorldState
 from core.tools import ToolsRegistry, ToolResult
 from models.llm_interface import LLMInterface
+from core.tracer import tracer
 
 MAX_REACT_STEPS = 5
 
 
-EXPERT_PROMPTS = {
-    "neutral": """[SYSTEM MESSAGE]
-You are OMEGA-DISPATCHER, a non-coding tool interface.
-Your ONLY capability is to break down requests into tool calls.
+BASE_EXPERT_PROMPT = """[SYSTEM MESSAGE]
+You are an OMEGA Expert. Your goal is to provide precision-focused verified data.
 
 🚨 MANDATORY FIRST ACTION FOR REALTIME DATA:
 If the user asks about ANY of these: price, cost, rate, exchange, weather, news, stock, crypto, Bitcoin, today's data...
-YOUR VERY FIRST RESPONSE MUST BE: "NEED_TOOL: search <query>"
-DO NOT provide any answer before getting search results. You do NOT have current data.
+YOUR VERY FIRST RESPONSE MUST BE: "NEED_TOOL: search <query> (volatility='high')"
+Use volatility='high' for any data that changes daily or faster.
+DO NOT provide any answer before getting search results.
 
-🧠 PURE REASONING / LOGIC PUZZLES:
-If the question is a WORD PROBLEM, RIDDLE, or LOGIC PUZZLE that can be solved with reasoning alone:
-- Do NOT search for the answer
-- Solve it step by step using logic
-- Example: "У Маши в два раза больше яблок..." → This is a MATH problem, solve algebraically
-- Example: "Перечисли города на букву Ы" → This is a TRICK question, answer directly
+🕒 TEMPORAL AWARENESS:
+If you need to know the EXACT current date, time, or day of the week to solve a problem or calculation, use: "NEED_TOOL: get_current_time".
+Do NOT rely on your internal calendar if it feels outdated.
 
-Example 1 (Search):
-User: "What is the weather in London?"
-You: "NEED_TOOL: search weather in London"
+⛔ ANTI-HALLUCINATION & THE "15°C TRAP" (CRITICAL!):
+1. NEVER guess numbers, prices, or values from memory.
+2. If asked for weather/prices, DO NOT say "15°C" or any other estimate unless it is in [OBSERVATION].
+3. If you don't have tool data, say "I don't know yet, I need to search."
+4. If [OBSERVATION] is missing data, try searching again or state that the data is not found. DO NOT INVENT it.
 
-Example 2 (Math):
-User: "Calculate battery drain from 100% at -5 rate for 10 mins"
-You: "NEED_TOOL: calculate_linear_change arguments: start=100 rate=-5 time=10"
-
-Example 3 (Logic - NO TOOL NEEDED):
-User: "У Пети 5 яблок, у Маши в 2 раза больше. Сколько у Маши?"
-You: "RESULT: У Маши 10 яблок. Расчёт: 5 × 2 = 10."
-
-⛔ NEVER DO THIS:
-- Guessing prices from memory (your training data is outdated!)
-- Writing code
-- Searching for logic puzzles that you can solve yourself
-
-✅ CORRECT PROTOCOL:
-1. REALTIME DATA → "NEED_TOOL: search <query>" (ALWAYS FIRST!)
-2. MATH with RATES → "NEED_TOOL: calculate..."
-3. LOGIC PUZZLES → Solve directly, no tools needed
-4. After [OBSERVATION] → STOP CALLING TOOLS! Use the data to answer.
-
-⚡ ATOMICITY RULE:
-Do NOT combine requests. Search for ONE fact at a time.
-WRONG: "NEED_TOOL: get weather and gold price"
-CORRECT: "NEED_TOOL: search weather in Poltava" (wait) -> "NEED_TOOL: search gold price"
+🌍 LANGUAGE POLICY:
+1. Always perform Tool Calls (NEED_TOOL: search ...) using the user's ORIGINAL query language.
+2. You may provide internal reasoning in English.
 
 🏆 FINAL ANSWER RULE:
-Always use the VERY LAST result from the [OBSERVATION] for your final answer.
-Ignore earlier calculations if a newer one exists.
+Use the [OBSERVATION] data as absolute truth. If missing, do not invent.
+"""
 
-🛑 STOP LOOPING RULE:
-If the context already contains [OBSERVATION] with the data you need:
-DO NOT call "NEED_TOOL" again.
-Instead, write: "RESULT: <answer based on observation>"
-
-GOAL: Use tools for external data, but solve logic puzzles yourself.
+EXPERT_PROMPTS = {
+    "neutral": BASE_EXPERT_PROMPT + """
+You are OMEGA-DISPATCHER. Break down requests into tool calls or final results based on verified data.
+Pure reasoning puzzles should be solved step-by-step without searching.
 """,
 
+    "creative": BASE_EXPERT_PROMPT + """
+You are a Creative Analyst. Propose innovative search queries to find rare information.
+Be concise and focused on novelty.
+""",
 
-    "creative": """You are a Creative Analyst. Be CONCISE.
-Propose innovative search queries to find rare information.
-DO NOT perform calculations unless explicitly requested.""",
+    "conservative": BASE_EXPERT_PROMPT + """
+You are a Risk Analyst. Verify information from multiple angles. Look for potential pitfalls.
+""",
 
-    "conservative": """You are a Risk Analyst. Be CONCISE.
-Verify information from multiple angles.
-DO NOT perform calculations unless explicitly requested.""",
+    "adversarial": BASE_EXPERT_PROMPT + """
+You are a Devil's Advocate. Question the findings. Look for contradictions or biases.
+""",
 
-    "adversarial": """You are a Devil's Advocate. Be CONCISE.
-Question the findings. Look for contradictions.
-DO NOT perform calculations unless explicitly requested.""",
+    "forecaster": BASE_EXPERT_PROMPT + """
+You are a Strategic Forecaster. Look for long-term trends and consequences.
+""",
 
-    "forecaster": """You are a Strategic Forecaster. Be CONCISE.
-Look for long-term trends and consequences.
-DO NOT perform calculations unless explicitly requested.""",
-
-    "physics": """You are a Physics Simulator. Your job is to MENTALLY SIMULATE physical scenarios.
-
+    "physics": BASE_EXPERT_PROMPT + """
+You are a Physics Simulator. MENTALLY SIMULATE physical scenarios.
 🔬 MENTAL SIMULATION PROTOCOL:
-Before answering ANY physics question, you MUST:
-
-1. **IDENTIFY OBJECTS**: List all physical objects in the scenario
-   - Material, mass, size, state (solid/liquid/gas)
-
-2. **IDENTIFY FORCES & CONDITIONS**: What forces/conditions act on each object?
-   - Gravity, friction, pressure, tension, buoyancy
-   - Temperature, atmosphere (vacuum = no air/oxygen)
-
-3. **SIMULATE STEP-BY-STEP**: What happens over time?
-   - t=0: Initial state
-   - t=1s: First changes (immediate effects)
-   - t=10s: Secondary effects
-   - Continue until equilibrium or requested state
-
-4. **CHECK PHYSICS LAWS**:
-   - Conservation of energy
-   - Conservation of momentum  
-   - Thermodynamics (heat flows hot→cold)
-   - Pressure (liquids boil in vacuum at ANY temperature)
-   - No oxygen = no combustion
-
-⚠️ COMMON TRAPS TO AVOID:
-- Candle in vacuum: No oxygen = no flame. Flame dies INSTANTLY.
-- Water in vacuum: Boils at room temperature due to low pressure.
-- Human at 50km altitude: No oxygen, near-vacuum pressure = death in seconds.
-- Gravity doesn't stop: Objects fall unless supported by a surface.
-
-Output format:
-[OBJECTS]: List objects with properties
-[CONDITIONS]: Forces, atmosphere, temperature
-[SIMULATION]: t=0... t=1s... t=10s...
-[ANSWER]: Based on simulation, the answer is...
-
-BE PRECISE. Physics has no mercy for hand-waving."""
+1. IDENTIFY OBJECTS
+2. IDENTIFY FORCES & CONDITIONS
+3. SIMULATE STEP-BY-STEP
+4. CHECK PHYSICS LAWS (Conservation of energy/momentum, Vacuum = no oxygen)
+"""
 }
 
 
@@ -153,21 +100,26 @@ class ExpertsModule:
         system_prompt = EXPERT_PROMPTS.get(expert_type, EXPERT_PROMPTS["neutral"])
         
         # DYNAMIC DATE INJECTION: Tell the model what today's date is
-        # DYNAMIC DATE INJECTION: Tell the model what today's date is
         from datetime import datetime
-        current_date = datetime.now().strftime("%d.%m.%Y")
-        system_prompt = f"""[TODAY'S DATE: {current_date}]
+        now = datetime.now()
+        current_date = now.strftime("%d.%m.%Y")
+        days_en = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        days_ru = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+        day_en = days_en[now.weekday()]
+        day_ru = days_ru[now.weekday()]
+        
+        system_prompt = f"""[TODAY'S DATE: {current_date}, {day_en} ({day_ru})]
 When searching for current data, always use this date as 'today'.
 
-🛡️ CONTEXT ISOLATION:
-1. Focus ONLY on the current user request.
-2. IGNORE previous [OBSERVATION] lines if they are from past turns (look at the conversation history).
-3. Do NOT hallucinate connections between unrelated queries.
+🛡️ CONTEXT ISOLATION & LANGUAGE:
+1. MANDATORY: Respond in the SAME LANGUAGE as the user (Russian/English).
+2. If tool results are missing, ADMIT IT. DO NOT GUESS historical data.
+3. DO NOT output internal thoughts like "adhering to constraints" or "processing JSON".
+4. VERACITY OVER HELPFULNESS: It is better to say "I don't know" than to lie or invent factual data.
 
 🌍 LANGUAGE RULE:
-- If the user writes in RUSSIAN, you MUST respond in RUSSIAN.
-- If the user writes in ENGLISH, you MUST respond in ENGLISH.
-- Translate tool outputs (like weather descriptions) into the user's language.
+- Translate tool outputs (like search snippets) into the user's language.
+- Russian Input -> Russian Output. English Input -> English Output.
 
 """ + system_prompt
         
@@ -192,9 +144,9 @@ When searching for current data, always use this date as 'today'.
         elif expert_type == "adversarial":
             temp = 0.4
         elif expert_type == "conservative":
-            temp = 0.3
+            temp = 0.0  # Conservative analyst should be deterministic
         else:
-            temp = 0.5
+            temp = 0.0  # Default (Neutral) expert should be deterministic for precision
         
         history = []
         if world_state.data:
@@ -224,8 +176,18 @@ When searching for current data, always use this date as 'today'.
             response_text = await self.llm.generate(
                 prompt=current_prompt,
                 system_prompt=system_prompt,
-                temperature=temp
+                temperature=temp,
+                stop=["[SYSTEM]"] # Stop if the model starts talking as system
             )
+            response_text = response_text.strip()
+            
+            # --- HALLUCINATION GUARD: Detect fake [OBSERVATION] injection ---
+            if "[OBSERVATION]" in response_text and "NEED_TOOL:" not in response_text and step == 0:
+                print(f"[Experts] HALLUCINATION DETECTED: {expert_type} injected [OBSERVATION] without tool call.")
+                # We'll prune the fake tag to avoid confusing the Critic
+                response_text = response_text.replace("[OBSERVATION]", "").strip()
+
+            tracer.add_step(f"expert_{expert_type}", "Thought", f"Iteration {step+1}: {response_text[:100]}...", data_out={"response": response_text})
             
             # --- GUARDRAIL: Detect Python Code Hallucination ---
             # If the model tries to write code blocks or functions, stop it.
@@ -244,13 +206,12 @@ Try again properly.
                 continue
             # ----------------------------------------------------
             
-            # If passed guardrail, add to history and user output
-            full_response_parts.append(response_text)
-            history.append(response_text)
-
             # 1. Parse for NEED_TOOL intent (for FunctionGemma)
             if self.tool_caller and "NEED_TOOL:" in response_text:
                 import re
+                # Add to history for loop continuity, but NOT to full_response_parts (user view)
+                history.append(response_text)
+                
                 # Extract ONLY the first NEED_TOOL command, stopping at newline or next NEED_TOOL
                 match = re.search(r"NEED_TOOL:\s*([^\n]+?)(?:\s*NEED_TOOL:|$)", response_text)
                 if match:
@@ -272,9 +233,9 @@ Try again properly.
                     
                     # Check if this is a search request for a logical problem
                     is_search_request = "search" in task_desc.lower()
-                    block_reason = should_block_search(prompt)  # Check original query
+                    should_block, block_reason = should_block_search(prompt)  # Check original query
                     
-                    if is_search_request and block_reason:
+                    if is_search_request and should_block:
                         print(f"[Experts] LOGIC GATE: Search blocked for logical problem (reason: {block_reason})")
                         observation = f"""
 [SYSTEM]: Search BLOCKED. This is a LOGICAL/ANALYTICAL problem that should be solved with REASONING, not search.
@@ -288,12 +249,14 @@ If any data is missing (like base price), express the answer as a FORMULA, not a
                         continue
                     
                     print(f"[Experts] Delegating to FunctionGemma: {task_desc}")
+                    tracer.add_step("tool_caller", "Dispatch", f"Requesting tool for: {task_desc[:50]}...")
                     
                     # FunctionGemma generates the PRECISE JSON
                     tools_def = ToolsRegistry.get_tool_definitions()
                     tool_json = await self.tool_caller.call_tool(task_desc, tools_def)
                     
                     if tool_json:
+                        tracer.add_step("tool_caller", "Tool Plan", f"Selected tool: {tool_json.get('tool')}", data_out=tool_json)
                         print(f"[Experts] FunctionGemma returned: {tool_json}")
                         
                         # HANDLE DIRECT CALCULATION (math bypass from FunctionGemma)
@@ -301,7 +264,7 @@ If any data is missing (like base price), express the answer as a FORMULA, not a
                             result = tool_json.get("arguments", {}).get("result")
                             expr = tool_json.get("arguments", {}).get("expression")
                             observation = f"\n[OBSERVATION]: Calculation result: {expr} = {result}"
-                            full_response_parts.append(observation)
+                            # Do NOT add observation to full_response_parts anymore
                             history.append(observation)
                             print(f"[Experts] Direct calculation: {expr} = {result}")
                             continue
@@ -325,15 +288,16 @@ If any data is missing (like base price), express the answer as a FORMULA, not a
                             observation = "\n[OBSERVATION]: Query about internal architecture blocked. Use existing knowledge."
                             history.append(observation)
                             continue
-                        
                         # Execute the generated JSON
                         try:
-                            tool_res = ToolsRegistry.execute_structured_call(json.dumps(tool_json))
+                            tracer.add_step("tools_registry", "Execute", f"Running {tool_json.get('tool')}")
+                            tool_res = await ToolsRegistry.execute_structured_call(json.dumps(tool_json, ensure_ascii=False))
+                            tracer.add_step("tools_registry", "Result", f"Execution successful", data_out=tool_res.to_dict())
                             print(f"[Experts] Tool executed: {tool_res.message[:100]}...")
                         except Exception as e:
+                            tracer.add_step("tools_registry", "Error", str(e))
                             print(f"[Experts] Tool execution FAILED: {e}")
                             observation = f"\n[OBSERVATION]: Tool error: {e}"
-                            full_response_parts.append(observation)
                             history.append(observation)
                             continue
                         
@@ -342,8 +306,6 @@ If any data is missing (like base price), express the answer as a FORMULA, not a
                             local_data.update(tool_res.state_update)
                         
                         observation = f"\n[OBSERVATION]: {tool_res.message}"
-                        full_response_parts.append(observation)
-                        
                         # Track last observation for verified result extraction
                         last_observation = tool_res.message
                         
@@ -351,6 +313,14 @@ If any data is missing (like base price), express the answer as a FORMULA, not a
                         continue
                     else:
                         print(f"[Experts] FunctionGemma returned None for task: {task_desc}")
+                        history.append("[SYSTEM]: Tool selection failed. Proceed with own knowledge.")
+                        continue
+            
+            # If we are here, it's NOT a tool call (or we finished tool calls)
+            # This is the actual response content
+            full_response_parts.append(response_text)
+            history.append(response_text)
+            break
 
 
             # 2. Fallback: Parse legacy JSON (if FunctionGemma not used or Main LLM hallucinates JSON)
@@ -361,7 +331,7 @@ If any data is missing (like base price), express the answer as a FORMULA, not a
                     if start != -1 and end != -1:
                         json_str = response_text[start:end]
                         if '"tool":' in json_str:
-                            tool_res = ToolsRegistry.execute_structured_call(json_str)
+                            tool_res = await ToolsRegistry.execute_structured_call(json_str)
                             # Apply state update
                             if tool_res.state_update:
                                 local_data.update(tool_res.state_update)
@@ -403,10 +373,15 @@ If any data is missing (like base price), express the answer as a FORMULA, not a
             final_text = "[SYSTEM ERROR]: Unable to generate a valid response after multiple attempts. The model may be hallucinating or failing to use tools correctly."
 
             
+        # DYNAMIC CONFIDENCE: If tool results were used, confidence is high
+        confidence = 0.8  # Default
+        if '[SEARCH RESULT]' in final_text or '[VERIFIED RESULT]' in final_text:
+            confidence = 1.0
+            
         return ExpertResponse(
             expert_type=expert_type,
             response=final_text,
-            confidence=0.8,
+            confidence=confidence,
             temperature_used=temp,
             reasoning=f"Generated with {expert_type} perspective in {step+1} steps",
             world_state=local_data
@@ -416,44 +391,62 @@ If any data is missing (like base price), express the answer as a FORMULA, not a
         self,
         prompt: str,
         world_state: WorldState,
-        context: str = ""
+        context: str = "",
+        intent: str = "neutral"
     ) -> list[ExpertResponse]:
-        """Consult all experts in parallel."""
+        """Consult selected experts based on intent."""
         import asyncio
         
+        # EXPERT SELECTION POLICY
+        available_experts = ["neutral"]
+        
+        if intent == "creative":
+            available_experts += ["creative"]
+        elif intent == "analytical":
+            available_experts += ["adversarial", "conservative"]
+        elif intent == "realtime_data":
+            available_experts += ["forecaster", "conservative"]
+        elif intent == "complex":
+            available_experts += ["forecaster", "adversarial"]
+        elif intent == "physics":
+            available_experts += ["physics"]
+        else:
+            # General or other - stick to neutral/conservative
+            available_experts += ["conservative"]
+            
         tasks = []
-        for expert_type in ["neutral", "creative", "conservative", "adversarial", "forecaster", "physics"]:
+        for expert_type in available_experts:
             tasks.append(self.consult_expert(expert_type, prompt, world_state, context))
             
         return await asyncio.gather(*tasks)
 
 
-CRITIC_PROMPT = """You are a rigorous Judge and Fact-Checker (CoVe Enforcer).
+CRITIC_PROMPT = """You are a rigorous Judge and Fact-Checker. 
+Your goal is to synthesize a final answer that is accurate and reliable.
 
-⚠️ CRITICAL ANTI-HALLUCINATION RULE:
-If an expert response contains [OBSERVATION] or [SEARCH RESULT], these are REAL DATA from external tools.
-You MUST use the exact values from [OBSERVATION]/[SEARCH RESULT] as authoritative ground truth.
-DO NOT make up or estimate numbers. Use ONLY the values from tool outputs.
+⚠️ HIERARCHY OF TRUTH (CRITICAL):
+1. [SEARCH RESULT] and [OBSERVATION] are the PRIMARY source of truth.
+2. If tool results provide current values (weather, price, date), prioritize the MOST RECENT and specific source.
+3. If search results are contradictory (e.g. different temperatures), explain the discrepancy briefly.
+4. If a result is marked as "1 week ago" or feels suspicious, mention this uncertainty.
 
-Phase 1: Chain of Verification (CoVe)
-- Identify key Facts/Claims in the expert responses.
-- CHECK: If [SEARCH RESULT] exists, extract the EXACT number from it and use it.
-- CHECK DIMENSIONS: Ensure formulas are valid (e.g. Rate * Time = Unit). Catch "Magic Math" (e.g. % * min).
-- Generate Verification Questions (e.g. "Is the sum correct?", "Is the definition of X specific to source Y?").
-- ANSWER the questions yourself using ONLY [OBSERVATION]/[SEARCH RESULT] data.
+Phase 1: Verification (BE CONCISE)
+- Compare key Facts. 
+- Identify and resolve contradictions. If resolution is impossible, note the discrepancy.
 
-Phase 2: Synthesis
-- If Forecaster provided scenarios, select the most robust one (check negative constraints).
-- If Adversarial Agent found flaws, address them directly.
-- Combine the verified facts into a final response.
-- THE FINAL NUMBERS MUST MATCH [OBSERVATION]/[SEARCH RESULT] EXACTLY.
+Phase 2: Synthesis (FINAL ANSWER)
+- Generate a definitive but nuanced response.
+- Do NOT repeat instructions or intermediate thoughts.
+- If data is inconsistent, say "Sources vary, but most indicate..." or "I found contradictory results: [A] and [B]".
 
 Output structure:
 [VERIFICATION PHASE]
-... (Questions and Answers) ...
+- (Analysis of facts and credibility)
 
 [FINAL SYNTHESIS]
-... (The definitive answer using EXACT values from tool outputs) ..."""
+(Clear, evidence-based answer)
+MANDATORY: Respond in the same language as the ORIGINAL QUERY (e.g. Russian, Ukrainian).
+"""
 
 
 
@@ -511,11 +504,13 @@ Context/Intent: {intent}
 
 Perform Chain of Verification (CoVe) and Synthesis."""
         
+        tracer.add_step("critic", "Verification", "Starting Chain of Verification (CoVe)")
         analysis = await self.llm.generate(
             prompt=prompt,
             system_prompt=CRITIC_PROMPT,
             temperature=0.2  # Very low temp for strict verification
         )
+        tracer.add_step("critic", "Synthesis", "Generating final response based on expert verification", data_out={"analysis": analysis})
         
         # Calculate disagreement score (simple heuristic)
         disagreement = self._calculate_disagreement(expert_responses)

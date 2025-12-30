@@ -8,9 +8,10 @@ Omega is an advanced cognitive architecture for Large Language Models (LLMs), de
 
 ### Core Capabilities
 - **Multi-Model Orchestration**: Fast path (Gemma3:4b) for routine tasks, Main expert (Gemma3:12b) for complex reasoning
-- **Self-Learning**: Periodic reflection extracts patterns and auto-tunes policies
-- **Deterministic Simulation**: Code-based FSM/Math solver prevents LLM hallucinations in calculations
-- **Security Layer**: Gatekeeper for trust scoring, Sanitizer for data leakage prevention
+- **Context Gate (Anti-Hallucination)**: Strictly blocks noisy search snippets and enforces a hard stop on missing data
+- **Automated Trip Planning**: Built-in geographical detection for "A to B" travel and distance retrieval
+- **Deterministic Simulation**: Code-based FSM/Math solver prevents LLM "guessing" in priority problems
+- **Self-Learning**: Periodic reflection extracts patterns and auto-tunes cognitive policies
 
 ### Architecture Highlights
 | Component | Purpose |

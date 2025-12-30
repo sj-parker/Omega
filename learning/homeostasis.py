@@ -59,6 +59,14 @@ class HomeostasisController:
         updates = {}
         reasons = []
         
+        # Prevent meaningless cycles: if metrics haven't changed, don't re-adjust
+        # This prevents infinite loops of +0.05 updates on static data
+        current_metrics_hash = hash(frozenset(metrics.items()))
+        if getattr(self, '_last_metrics_hash', None) == current_metrics_hash:
+            return None
+        self._last_metrics_hash = current_metrics_hash
+
+        
         # Check confidence
         avg_conf = metrics.get("avg_confidence", 0.7)
         if avg_conf < self.targets["confidence"]["min"]:

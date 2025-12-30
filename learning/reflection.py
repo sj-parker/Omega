@@ -59,45 +59,14 @@ class ReflectionController:
         self._running = False
         self._task: Optional[asyncio.Task] = None
     
-    async def start_background(self, interval_seconds: float = 60.0):
-        """Start background reflection loop."""
-        self._running = True
-        self._task = asyncio.create_task(self._reflection_loop(interval_seconds))
-    
-    async def stop_background(self):
-        """Stop background reflection loop."""
-        self._running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-    
-    async def _reflection_loop(self, interval: float):
-        """Main reflection loop."""
-        from datetime import datetime
-        print(f"[Reflection] Background loop started (interval: {interval}s)")
-        
-        while self._running:
-            try:
-                print(f"[Reflection] {datetime.now().strftime('%H:%M:%S')} - Running background reflection...")
-                pattern = await self._do_reflect(verbose=False)
-                if pattern:
-                    print(f"[Reflection] {datetime.now().strftime('%H:%M:%S')} - Pattern: {pattern.description[:80]}...")
-                else:
-                    print(f"[Reflection] {datetime.now().strftime('%H:%M:%S')} - No pattern (not enough data)")
-            except Exception as e:
-                print(f"[Reflection] {datetime.now().strftime('%H:%M:%S')} - Error: {e}")
-            
-            await asyncio.sleep(interval)
-    
     async def reflect_once(self) -> Optional[ExtractedPattern]:
         """
-        Perform a single reflection cycle (user-triggered).
+        Perform a single reflection cycle.
         
         Returns extracted pattern if any.
         """
+        return await self._do_reflect(verbose=True)
+
         return await self._do_reflect(verbose=True)
     
     async def _do_reflect(self, verbose: bool = False) -> Optional[ExtractedPattern]:
@@ -162,6 +131,52 @@ class ReflectionController:
             self.learning_decoder.save_patterns()
             if verbose:
                 print(f"[Reflection] Pattern: {pattern.description}")
+
+        # --- Create Synthetic Trace for Visualization ---
+        from models.schemas import RawTrace, TraceStep
+        from datetime import datetime
+        import uuid
+
+        # Create steps
+        steps = []
+        steps.append(TraceStep(
+            module="ReflectionController",
+            name="AnalyzeEpisodes",
+            description=f"Analyzed {len(summaries)} recent episodes",
+            data_in={"episode_count": len(summaries)},
+            data_out={"metrics": metrics},
+            timestamp=datetime.now()
+        ))
+
+        if pattern:
+            steps.append(TraceStep(
+                module="PatternImpactResolver",
+                name="ResolveImpact",
+                description="Determined policy impact of found pattern",
+                data_in={"pattern": pattern.description},
+                data_out={"impact": pattern.suggested_update},
+                timestamp=datetime.now()
+            ))
+
+        reflection_trace = RawTrace(
+            episode_id=str(uuid.uuid4()),
+            timestamp=datetime.now(),
+            user_input="[System Reflection]",
+            context_snapshot={"mode": "reflection"},
+            expert_outputs=[],
+            critic_output={},
+            decision={
+                "action": "Pattern Found" if pattern else "No Pattern",
+                "confidence": pattern.confidence if pattern else 0.0,
+                "cost": {"time_ms": 0},
+                "depth_used": "reflection"
+            },
+            final_response=f"Pattern: {pattern.description}" if pattern else "No significant patterns found.",
+            steps=steps
+        )
+
+        # Save using the new special method
+        self.learning_decoder.record_reflection_trace(reflection_trace)
         
         return pattern
     

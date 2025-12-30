@@ -24,7 +24,7 @@ async def test_full_search_flow():
     
     # Step 2: Execute the tool
     print("\n--- Step 2: Execute Tool via ToolsRegistry ---")
-    tool_result = ToolsRegistry.execute_structured_call(json.dumps(result))
+    tool_result = await ToolsRegistry.execute_structured_call(json.dumps(result))
     print(f"Tool execution result: {tool_result}")
     
     if "88" in tool_result.message or "87" in tool_result.message or "89" in tool_result.message:

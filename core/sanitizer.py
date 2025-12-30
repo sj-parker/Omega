@@ -16,6 +16,15 @@ class SanitizationResult:
     redaction_types: list[str] = field(default_factory=list)
     sanitized_text: str = ""
     
+    def to_dict(self) -> dict:
+        return {
+            "original_length": self.original_length,
+            "sanitized_length": self.sanitized_length,
+            "redactions_count": self.redactions_count,
+            "redaction_types": self.redaction_types,
+            "sanitized_text": self.sanitized_text
+        }
+    
     @property
     def was_modified(self) -> bool:
         return self.redactions_count > 0

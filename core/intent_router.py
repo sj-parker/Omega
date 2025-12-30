@@ -92,7 +92,7 @@ class IntentRouter:
         # We can enforce specific order if needed.
         
         # Pre-defined priority list to match original logic's precedence
-        priority_order = ["realtime_data", "calculation", "analytical", "philosophical", "physics"]
+        priority_order = ["memorize", "recall", "realtime_data", "calculation", "creative", "analytical", "philosophical", "physics"]
         
         for intent in priority_order:
             if intent not in self.rules:

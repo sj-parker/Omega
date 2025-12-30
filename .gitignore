@@ -5,6 +5,8 @@ __pycache__/
 *.so
 .Python
 env/
+venv/
+.venv/
 build/
 develop-eggs/
 dist/
@@ -27,3 +29,10 @@ learning_data/
 .env
 .vscode/
 .idea/
+.gemini/
+qData.txt
+teh.txt
+learning/
+learning_data/episodes/
+learning_data/patterns/
+learning_data/policies/

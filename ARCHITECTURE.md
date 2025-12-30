@@ -1,6 +1,6 @@
 # Omega Architecture Map
 
-> **Last Updated**: 2024-12-28  
+> **Last Updated**: 2025-12-30  
 > **Purpose**: Quick reference for module interactions and data flow
 
 ## 🏗️ System Overview
@@ -13,25 +13,37 @@
 │  User Input                                                                 │
 │      │                                                                      │
 │      ▼                                                                      │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                     │
-│  │ Gatekeeper  │───▶│  Context    │───▶│ Operational │                     │
-│  │ (Security)  │    │  Manager    │    │   Module    │                     │
-│  └─────────────┘    └─────────────┘    └──────┬──────┘                     │
-│                                               │                             │
-│         ┌────────────────────────────────────┼────────────────────┐        │
-│         │                    │               │                     │        │
-│         ▼                    ▼               ▼                     ▼        │
-│  ┌────────────┐  ┌────────────────┐  ┌────────────┐  ┌────────────────┐    │
-│  │ IntentRoute│  │TaskDecomposer  │  │Simulation  │  │ ExpertsModule  │    │
-│  │ (Classify) │  │(Parse problem) │  │  Engine    │  │(LLM reasoning) │    │
-│  └────────────┘  └────────────────┘  └────────────┘  └───────┬────────┘    │
-│                                                               │             │
-│                                                     ┌─────────┴─────────┐   │
-│                                                     │     Critic        │   │
-│                                                     │  (Verification)   │   │
-│                                                     └─────────┬─────────┘   │
-│                                                               │             │
-│                              ┌────────────────────────────────┘             │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────────┐                 │
+│  │ Gatekeeper  │───▶│  Context    │───▶│ TaskOrchestrator│                 │
+│  │ (Security)  │    │  Manager    │    │   (Planner)     │                 │
+│  └─────────────┘    └─────────────┘    └────────┬────────┘                 │
+│                                                  │                          │
+│                                          Creates Task[]                     │
+│                                          with ContextScope                  │
+│                                                  │                          │
+│                                          ┌──────▼──────┐                   │
+│                                          │  TaskQueue  │                   │
+│                                          │ (Priority)  │                   │
+│                                          └──────┬──────┘                   │
+│                                                 │                          │
+│         ┌───────────────────────────────────────┼──────────────────┐       │
+│         │                    │                  │                   │       │
+│         ▼ ctx:NONE           ▼ ctx:RECENT       ▼ ctx:FULL          │       │
+│  ┌────────────┐       ┌────────────┐     ┌────────────────┐        │       │
+│  │InfoBroker  │       │ LLM Fast/  │     │ ExpertsModule  │        │       │
+│  │  (Search)  │       │ Medium     │     │(LLM reasoning) │        │       │
+│  └────────────┘       └────────────┘     └───────┬────────┘        │       │
+│                                                   │                 │       │
+│                                         ┌─────────┴─────────┐      │       │
+│                                         │     Critic        │      │       │
+│                                         │  (Verification)   │      │       │
+│                                         └─────────┬─────────┘      │       │
+│                                                   │                 │       │
+│         └─────────────────────────────────────────┼─────────────────┘       │
+│                                                   ▼                         │
+│                                          Aggregate Results                  │
+│                                                   │                         │
+│                              ┌────────────────────┘                         │
 │                              ▼                                              │
 │                     ┌─────────────────┐                                     │
 │                     │    Sanitizer    │                                     │
@@ -137,17 +149,15 @@ User Input
        │
        ▼
 ┌──────────────┐
-│ IntentRouter │ ─── classify() → (intent, confidence)
-└──────┬───────┘      Fast path (keywords) or LLM classification
+│    O.M.      │ ─── classify() → decide_depth()
+└──────┬───────┘      (Internal IntentRouter + keyword rules)
        │
-       ▼
-┌──────────────┐
-│    O.M.      │ ─── _decide_depth() → FAST / MEDIUM / DEEP
-└──────┬───────┘
        │
-       ├── FAST ────────▶ Direct LLM response
+       ├── FAST ────────▶ Direct LLM response (with Context Injection)
+       │                  (Uses last 5 recent events for continuity)
        │
-       ├── MEDIUM ──────▶ LLM + memory context
+       ├── MEDIUM ──────▶ LLM + memory context (+ LongTerm Memory)
+       │                  (Recall/Fact retrieval path)
        │
        └── DEEP ────────┬──▶ TaskDecomposer.decompose()
                         │       └── DecomposedProblem (entities, rules)
@@ -183,7 +193,7 @@ Response + Decision
         ▼
 ┌────────────────┐
 │  Reflection    │ ─── run_reflection() → Extract patterns
-└───────┬────────┘
+└───────┬────────┘      (Needs min 3 episodes to activate)
         │
         ▼
 ┌────────────────┐
@@ -223,18 +233,21 @@ Response + Decision
 | `Orchestrator` | Module registry, hot-swap | `register_module()`, `dispatch()`, `replace_module()` |
 | `TaskQueue` | Priority scheduling | `enqueue()`, `dequeue()`, `wait_for()` |
 | `InfoBroker` | Unified info retrieval | `request_info()` → Cache→Memory→Search→Expert→Fallback |
+| `Tracer` | Context-safe tracing | `start_session()`, `add_step()`, `end_session()` |
 
 ### Problem Solving Layer
 | Module | Purpose | Key Methods |
 |--------|---------|-------------|
 | `TaskDecomposer` | Parse GIVEN vs MISSING data | `decompose()`, `is_complex_problem()` |
-| `SimulationEngine` | Deterministic calculations | `FSMSimulator`, `MathSolver`, `parse_robot_scenario()` |
+| `SimulationEngine` | Deterministic calculations | `FSMSimulator`, `MathSolver` |
+| **Logic Note** | Trip Detection | Automatically identifies "from A to B" patterns and seek distance data through search. |
 
 ### Safety Layer
 | Module | Purpose | Key Methods |
 |--------|---------|-------------|
 | `Sanitizer` | Block sensitive data | `sanitize()` → regex for passwords, API keys |
-| `FallbackGenerator` | "I don't know" templates | `admit_uncertainty()`, `suggest_clarification()` |
+| `Context Gate` | Block noise context | Orchestrator filter: only passes `sufficient` search data to reasoning steps. |
+| `Semantic Verify` | Search result validation | InfoBroker check: triggers only if core keywords (distance, price) exist in snippets. |
 | `IdentityFilter` | Remove LLM identity leaks | Filter "As an AI", "I'm Gemma" etc. |
 
 ---
@@ -253,15 +266,18 @@ models:
 ### `config/intent_rules.yaml` - Intent Classification
 ```yaml
 intents:
+  memorize:
+    keywords: [запомни, сохрани, remember, save]
+    priority: HIGH
+  recall:
+    keywords: [напомни, вспомни, remind, what was]
+    priority: HIGH
   realtime_data:
     keywords: [price, weather, news, stock, crypto]
     threshold: 0.7
   calculation:
     keywords: [calculate, compute, formula]
     threshold: 0.8
-  philosophical:
-    keywords: [meaning, ethics, consciousness]
-    threshold: 0.6
 ```
 
 ---

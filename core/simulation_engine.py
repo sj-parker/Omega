@@ -47,6 +47,15 @@ class SimulationResult:
     answer_text: str = ""
     error: str = ""
     
+    def to_dict(self) -> dict:
+        return {
+            "success": self.success,
+            "final_values": self.final_values,
+            "steps": [s.to_dict() for s in self.steps],
+            "answer_text": self.answer_text,
+            "error": self.error
+        }
+    
     def get_trace(self, max_steps: int = 10) -> str:
         """Get human-readable trace of key steps."""
         if not self.steps:
@@ -426,6 +435,73 @@ class MathSolver:
 
 
 # ============================================================================
+# RESOURCE SOLVER - For consumption/trip calculations
+# ============================================================================
+
+class ResourceSolver:
+    """
+    Solver for resource consumption problems.
+    
+    Handles:
+    - Trip planning (distance, consumption rate)
+    - Battery/Fuel usage
+    """
+    
+    def calculate_trip_requirements(
+        self,
+        distance: float,
+        consumption_rate: float,
+        rate_unit_dist: float = 100.0,
+        current_resource: float = 100.0,
+        resource_capacity: float = 100.0,
+        units: Dict[str, str] = {"dist": "km", "res": "%"}
+    ) -> SimulationResult:
+        """
+        Calculate resource requirements for a trip.
+        
+        Args:
+            distance: Total distance to travel
+            consumption_rate: Amount consumed per rate_unit_dist
+            rate_unit_dist: Distance unit for rate (e.g. per 100km)
+            current_resource: Current amount
+            units: Dictionary of units {"dist": "km", "res": "%"}
+        """
+        dist_unit = units.get("dist", "km")
+        res_unit = units.get("res", "%")
+        
+        # Calculate total consumption
+        # Rate is X per Y dist. Total = (Distance / Y) * X
+        total_consumption = (distance / rate_unit_dist) * consumption_rate
+        
+        remaining = current_resource - total_consumption
+        is_possible = remaining >= 0
+        
+        shortage = abs(remaining) if remaining < 0 else 0
+        
+        # Format strings for result
+        verdict_ok = f"✅ Хватит ({remaining:.2f}{res_unit} останется)"
+        verdict_fail = f"❌ НЕ ХВАТИТ (нужно ещё {shortage:.2f}{res_unit})"
+        
+        return SimulationResult(
+            success=True,
+            final_values={
+                "distance": distance,
+                "total_consumption": round(total_consumption, 2),
+                "remaining_resource": round(remaining, 2),
+                "is_possible": is_possible,
+                "shortage": round(shortage, 2),
+                "units": units
+            },
+            steps=[],
+            answer_text=f"""**Расчёт поездки ({distance} {dist_unit}):**
+- Расход: {consumption_rate}{res_unit} на {rate_unit_dist} {dist_unit}
+- **Всего потребуется: {round(total_consumption, 2)}{res_unit}**
+- Текущий запас: {current_resource}{res_unit}
+- Остаток после поездки: {round(remaining, 2)}{res_unit}
+- **Вердикт:** {verdict_ok if is_possible else verdict_fail}"""
+        )
+
+# ============================================================================
 # SIMULATION ENGINE - Main entry point
 # ============================================================================
 
@@ -440,6 +516,7 @@ class SimulationEngine:
     def __init__(self):
         self.fsm = FSMSimulator()
         self.math = MathSolver()
+        self.resource = ResourceSolver()
         self._stats = {
             "simulations_run": 0,
             "by_type": {}
@@ -453,21 +530,33 @@ class SimulationEngine:
         """Detect what type of simulation is needed."""
         query_lower = query.lower()
         
-        # FSM patterns (robots, charging, queues)
-        fsm_patterns = [
-            r"робот|robot",
-            r"заряд.*%|charge.*%",
-            r"idle|charging|working",
-            r"порт|port|slot",
-            r"очередь|queue|priority",
-            r"задач.*длительность|task.*duration",
+        # 1. Resource/Consumption patterns (battery, fuel, trip) - HIGH PRIORITY
+        resource_patterns = [
+            r"трат|spend|spend.*charge|consume",
+            r"расход|usage|consumption",
+            r"хватит|enough|sufficient",
+            r"сколько.*заряд|how.*much.*charge",
+            r"поездк|trip|travel|drive|путь",
+            r"расстояни|дистанц|distance|km|км|miles|миль",
         ]
         
-        for pattern in fsm_patterns:
+        for pattern in resource_patterns:
             if re.search(pattern, query_lower):
-                return SimulationType.FSM
+                return SimulationType.MATH
         
-        # Math patterns
+        # 2. FSM patterns (robots, charging, queues) - ONLY if robots/ports mentioned
+        if re.search(r"робот|robot|порт|port", query_lower):
+            fsm_patterns = [
+                r"заряд.*%|charge.*%",
+                r"idle|charging|working",
+                r"очередь|queue|priority",
+                r"задач.*длительность|task.*duration",
+            ]
+            for pattern in fsm_patterns:
+                if re.search(pattern, query_lower):
+                    return SimulationType.FSM
+        
+        # 3. Math patterns
         math_patterns = [
             r"\d+\s*[+\-*/×÷]\s*\d+",
             r"процент|percent|%.*от|of",
@@ -478,7 +567,7 @@ class SimulationEngine:
             if re.search(pattern, query_lower):
                 return SimulationType.MATH
         
-        # Physics patterns
+        # 4. Physics patterns
         physics_patterns = [
             r"вакуум|vacuum",
             r"давлен|pressure",
@@ -633,5 +722,128 @@ class SimulationEngine:
         
         return SimulationResult(success=False, final_values={}, error="No entities or tasks to simulate")
     
+    def parse_consumption_scenario(self, query: str) -> Optional[Dict]:
+        """
+        Parse consumption/trip scenario from natural language.
+        
+        Extracts:
+        - Consumption rate (e.g. 1% per 50km, 5L/100km, 20mpg)
+        - Distance (e.g. 660km, 400 miles)
+        - Current resource (e.g. 100%, 50L, full tank)
+        - Units used (km/miles, L/%, etc)
+        """
+        result = {
+            "consumption_rate": None,
+            "rate_unit_dist": 100.0,
+            "distance": None,
+            "current_resource": 100.0,
+            "units": {
+                "dist": "km",
+                "res": "%"
+            },
+            "missing": []
+        }
+        
+        # Regex components
+        num_re = r"(\d+(?:\.\d+)?)"
+        dist_unit_re = r"(?:км|km|мил|mil|mi|м|m)"
+        res_unit_re = r"(?:%|L|л|l|гал|gal|kWh|кВтч|liters|gallons)"
+        sep_re = r"(?:на|per|/|for|in)"
+        
+        # 1. Extract Consumption Rate
+        # Pattern A: "5L per 100km", "10 kwh / 100 mi"
+        strict_match = re.search(f"{num_re}\s*({res_unit_re})?\s*{sep_re}\s*{num_re}\s*({dist_unit_re})", query, re.I)
+        
+        if strict_match:
+            result["consumption_rate"] = float(strict_match.group(1))
+            if strict_match.group(2):
+                result["units"]["res"] = strict_match.group(2).strip()
+            result["rate_unit_dist"] = float(strict_match.group(3))
+            result["units"]["dist"] = strict_match.group(4).strip()
+        else:
+            # Pattern B: "1% ... 50 km" (looser)
+            # Check for implicit rate "1% charge" followed somewhat later by "50 km"
+            loose_match = re.search(f"{num_re}\s*({res_unit_re}).{{0,20}}\s*{num_re}\s*({dist_unit_re})", query, re.I)
+            if loose_match:
+                 result["consumption_rate"] = float(loose_match.group(1))
+                 result["units"]["res"] = loose_match.group(2).strip()
+                 result["rate_unit_dist"] = float(loose_match.group(3))
+                 result["units"]["dist"] = loose_match.group(4).strip()
+        
+        # Fallback for "MPG" (Miles Per Gallon)
+        # 20 mpg -> 1 gallon per 20 miles
+        mpg_match = re.search(f"{num_re}\s*mpg", query, re.I)
+        if mpg_match and result["consumption_rate"] is None:
+             mpg_val = float(mpg_match.group(1))
+             # Rate: 1 gallon per MPG_VALUE miles
+             result["consumption_rate"] = 1.0
+             result["rate_unit_dist"] = mpg_val
+             result["units"]["res"] = "gal"
+             result["units"]["dist"] = "miles"
+        
+        if result["consumption_rate"] is None:
+             # Fallback: simple "5 L per km" (unit implicit 1)
+             rate_match_simple = re.search(f"{num_re}\s*({res_unit_re})\s*{sep_re}\s*({dist_unit_re})", query, re.I)
+             if rate_match_simple:
+                result["consumption_rate"] = float(rate_match_simple.group(1))
+                result["units"]["res"] = rate_match_simple.group(2).strip()
+                result["rate_unit_dist"] = 1.0
+                result["units"]["dist"] = rate_match_simple.group(3).strip()
+
+        # 2. Extract Trip Distance
+        # Find all distances, try to exclude the one used in rate
+        all_dist_matches = re.findall(f"{num_re}\s*({dist_unit_re})", query, re.I)
+        candidates = []
+        for val, unit in all_dist_matches:
+            val_f = float(val)
+            # Filter matches that exactly equal the rate unit distance
+            if result["consumption_rate"] and val_f == result["rate_unit_dist"]:
+                continue
+            candidates.append(val_f)
+            
+            # Update global distance unit if not set by rate
+            if result["units"]["dist"] == "km" and unit.lower() in ['mi', 'mil', 'мил', 'miles']:
+                result["units"]["dist"] = "miles"
+
+        if candidates:
+            # Assume max distance is the trip (heuristic)
+            result["distance"] = max(candidates)
+        
+        # 3. Extract Current Resource
+        # "full tank", "full battery", "полный бак" -> 100% (or generic 100 if unknown capacity)
+        if re.search(r"полн|full", query, re.I):
+            result["current_resource"] = 100.0 # treating as % or capacity
+            if "tank" in query.lower() or "бак" in query.lower():
+                # If we detected Liter usage earlier, this 100 might be wrong if we don't know tank size.
+                # But for now, let's assume 100% and logic will work with %.
+                pass
+        else:
+            # Look for explicit resource amount
+            # "50L", "89%"
+            # Exclude consumption rate value
+            # Only match if unit matches inferred resource unit
+            target_unit = result["units"]["res"]
+            # specific regex for the target unit to find current amount
+            curr_matches = re.finditer(f"{num_re}\s*({re.escape(target_unit)})", query, re.I)
+            for m in curr_matches:
+                val = float(m.group(1))
+                if result["consumption_rate"] is not None and val == result["consumption_rate"]:
+                    continue
+                result["current_resource"] = val
+                break
+
+        # Check missing
+        if result["consumption_rate"] is None:
+            result["missing"].append("consumption_rate")
+        
+        if result["distance"] is None:
+            # Check for city names implies we need distance
+            if re.search(r"(?:из|from)\s+[А-Яа-яA-Z][a-z]+", query) or re.search(r"(?:в|to)\s+[А-Яа-яA-Z][a-z]+", query):
+                 result["missing"].append("distance_lookup_needed")
+            else:
+                 result["missing"].append("distance")
+                 
+        return result
+
     def get_stats(self) -> dict:
         return self._stats

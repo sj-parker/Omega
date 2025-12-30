@@ -16,11 +16,17 @@ class AllocationArgs(BaseModel):
 
 class SearchAndExtractArgs(BaseModel):
     query: str
-    target: str = "fact"  # What to extract (e.g. "price", "date")
+    target: str = "fact"
+    volatility: str = "low"
 
 class VerifyFactArgs(BaseModel):
     fact: str
     original_source: str
+    volatility: str = "low"
+
+class GetCurrentTimeArgs(BaseModel):
+    # No arguments needed, but keeps schema consistent
+    pass
 
 class ToolCall(BaseModel):
     tool: str
@@ -29,6 +35,9 @@ class ToolCall(BaseModel):
 class ToolResult(BaseModel):
     message: str
     state_update: dict[str, Any] = {}
+    
+    def to_dict(self) -> dict:
+        return self.dict() if hasattr(self, 'dict') else self.model_dump()
 
 class ToolsRegistry:
     """
@@ -66,28 +75,43 @@ class ToolsRegistry:
             return ToolResult(message=f"Math Error: {str(e)}")
             
     @staticmethod
-    def search_and_extract(args: SearchAndExtractArgs) -> ToolResult:
+    async def search_and_extract(args: SearchAndExtractArgs) -> ToolResult:
         try:
+            from datetime import datetime
+            now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
             engine = ToolsRegistry.get_search_engine()
-            res = engine.search_and_extract(args.query, args.target)
-            msg = f"Fact: {res['fact']} (Confidence: {res['confidence']}, Source: {res['source']})"
+            res = await engine.search_and_extract(args.query, args.target, volatility=args.volatility)
+            msg = f"Fact: {res['fact']} (Retrieved: {now}, Confidence: {res['confidence']}, Source: {res['source']})"
             return ToolResult(message=msg)
         except Exception as e:
             return ToolResult(message=f"Search Error: {str(e)}")
 
     @staticmethod
-    def verify_fact(args: VerifyFactArgs) -> ToolResult:
+    async def verify_fact(args: VerifyFactArgs) -> ToolResult:
         try:
+            from datetime import datetime
+            now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
             engine = ToolsRegistry.get_search_engine()
-            res = engine.verify_fact(args.fact, args.original_source)
+            res = await engine.verify_fact(args.fact, args.original_source, volatility=args.volatility)
             status = "VERIFIED" if res['verified'] else "UNVERIFIED"
-            msg = f"Status: {status} | Cross-check: {res.get('cross_check_source', 'None')}"
+            msg = f"Status: {status} | Cross-check: {res.get('cross_check_source', 'None')} (Verified at: {now})"
             return ToolResult(message=msg)
         except Exception as e:
             return ToolResult(message=f"Verification Error: {str(e)}")
 
     @staticmethod
-    def execute_structured_call(json_str: str) -> ToolResult:
+    def get_current_time(args: GetCurrentTimeArgs) -> ToolResult:
+        from datetime import datetime
+        now = datetime.now()
+        days_en = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        days_ru = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+        day_en = days_en[now.weekday()]
+        day_ru = days_ru[now.weekday()]
+        msg = f"Current Time: {now.strftime('%d.%m.%Y %H:%M:%S')}, {day_en} ({day_ru})"
+        return ToolResult(message=msg)
+
+    @staticmethod
+    async def execute_structured_call(json_str: str) -> ToolResult:
         """
         Parses JSON string -> Validates via Pydantic -> Executes.
         Returns ToolResult.
@@ -108,11 +132,15 @@ class ToolsRegistry:
             
             elif call.tool == "search_and_extract":
                 args = SearchAndExtractArgs(**call.arguments)
-                return ToolsRegistry.search_and_extract(args)
+                return await ToolsRegistry.search_and_extract(args)
                 
             elif call.tool == "verify_fact":
                 args = VerifyFactArgs(**call.arguments)
-                return ToolsRegistry.verify_fact(args)
+                return await ToolsRegistry.verify_fact(args)
+                
+            elif call.tool == "get_current_time":
+                args = GetCurrentTimeArgs(**call.arguments)
+                return ToolsRegistry.get_current_time(args)
                 
             else:
                 return ToolResult(message=f"Error: Unknown tool '{call.tool}'")
@@ -223,6 +251,18 @@ class ToolsRegistry:
                             }
                         },
                         "required": ["fact", "original_source"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_current_time",
+                    "description": "Get current system date, time and day of the week. Use this when the exact current date/time is needed for calculations or context.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": []
                     }
                 }
             }

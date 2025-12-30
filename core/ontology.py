@@ -102,6 +102,17 @@ SEARCH_BLOCKED_PATTERNS = [
     r"(?:на\s+станц|at\s+station).*(?:порт|port)",
 ]
 
+# Patterns that ALWAYS allow search (Geography, constants, etc.)
+SEARCH_ALLOWED_PATTERNS = [
+    r"город|city|town|place",
+    r"дистанц|расстояни|distance|км|km|miles|миль",
+    r"дата|date|today|сегодня",
+    r"курс|курс\s+валют|цена|price|cost|стоимость|rate",
+    r"население|population",
+    r"погода|weather|температура|temperature",
+    r"биография|кто\s+такой|who\s+is",
+]
+
 
 def is_internal_query(text: str) -> bool:
     """Check if query is asking about Omega internal components."""
@@ -152,6 +163,12 @@ def should_block_search(text: str) -> tuple[bool, str]:
     """
     text_lower = text.lower()
     
+    # 1. Check if ANY pattern allows search (High Priority)
+    for allowed in SEARCH_ALLOWED_PATTERNS:
+        if re.search(allowed, text_lower):
+            return False, ""
+            
+    # 2. Check blocked patterns
     for pattern in SEARCH_BLOCKED_PATTERNS:
         if re.search(pattern, text_lower):
             # Determine reason

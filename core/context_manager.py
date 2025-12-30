@@ -9,7 +9,8 @@ import sys
 sys.path.insert(0, str(__file__).rsplit('\\', 2)[0])
 
 from models.schemas import (
-    UserIdentity, ContextEvent, ContextSlice, DecisionObject, LongTermFact, WorldState
+    UserIdentity, ContextEvent, ContextSlice, DecisionObject, LongTermFact, WorldState,
+    ContextScope
 )
 
 
@@ -289,3 +290,43 @@ class ContextManager:
                 "mode": self.short_store.system_mode
             }
         }
+    
+    def get_scoped_context(
+        self,
+        scope: ContextScope,
+        n_recent: int = 5,
+        semantic_filter: Optional[str] = None
+    ) -> Optional[dict]:
+        """
+        Get context based on requested scope.
+        
+        Used for Task-Based Context Slicing - each task specifies
+        how much context it needs.
+        
+        Args:
+            scope: Level of context needed (NONE, RECENT, RELEVANT, FULL)
+            n_recent: Number of recent events for RECENT scope
+            semantic_filter: Query string for RELEVANT scope
+        
+        Returns:
+            Context dict or None for NONE scope
+        """
+        if scope == ContextScope.NONE:
+            return None
+        
+        elif scope == ContextScope.RECENT:
+            events = self.short_store.get_recent_events(n_recent)
+            return {
+                "recent_events": [e.to_dict() for e in events],
+                "active_goal": self.short_store.active_goal
+            }
+        
+        elif scope == ContextScope.RELEVANT:
+            facts = self.search_facts(semantic_filter or "")
+            return {
+                "relevant_facts": [f.to_dict() for f in facts],
+                "query": semantic_filter
+            }
+        
+        elif scope == ContextScope.FULL:
+            return self.get_full_context()

@@ -21,6 +21,7 @@ class InfoSource(Enum):
     EXPERT = "expert"           # LLM reasoning
     FALLBACK = "fallback"       # Admitted uncertainty
     CACHE = "cache"             # Short-term cache
+    SPECIALIST = "specialist"   # Autonomous logic (Geo, Temporal, etc.)
 
 
 @dataclass
@@ -35,8 +36,29 @@ class InfoResult:
     
     @property
     def is_sufficient(self) -> bool:
-        """Check if the information is sufficient for answering."""
-        return self.confidence >= 0.5 and self.data is not None
+        """Returns True if the information is likely sufficient."""
+        if self.confidence < 0.7:
+            return False
+            
+        # Semantic check: if query has keywords, they should be in snippets
+        if not self.data:
+            return False
+            
+        # Very basic keyword overlap check
+        # We look for stems to handle basic Russian/English morphology
+        stop_words = {"расстояние", "километр", "км", "цена", "стоит", "курс", "погода", "температура", "distance", "km", "price", "weather"}
+        query_words = set(re.findall(r'[а-яa-z]+', self.query.lower()))
+        data_words = set(re.findall(r'[а-яa-z]+', self.data.lower()))
+        
+        # Intersection of query descriptors and data
+        descriptors = query_words.intersection(stop_words)
+        if descriptors:
+            # If user asked for distance/price, we MUST find it (or similar word) in data
+            found_any = any(d[:4] in self.data.lower() for d in descriptors) # stem match
+            if not found_any:
+                return False
+                
+        return True
     
     def to_dict(self) -> dict:
         return {
@@ -92,6 +114,12 @@ class InfoBroker:
         self.experts = experts
         self.config = config or FallbackChainConfig()
         
+        # Specialists
+        from core.temporal_specialist import TemporalSpecialist
+        from core.geography_tool import GeographyTool
+        self.temporal = TemporalSpecialist()
+        self.geography = GeographyTool()
+        
         # Short-term cache
         self._cache: dict[str, tuple[InfoResult, datetime]] = {}
         
@@ -110,7 +138,8 @@ class InfoBroker:
         query: str,
         min_confidence: float = 0.5,
         sources: Optional[List[InfoSource]] = None,
-        world_state: Optional['WorldState'] = None
+        world_state: Optional['WorldState'] = None,
+        **kwargs
     ) -> InfoResult:
         """
         Request information using the fallback chain.
@@ -128,7 +157,14 @@ class InfoBroker:
         
         # Default to all sources
         if sources is None:
-            sources = [InfoSource.CACHE, InfoSource.MEMORY, InfoSource.SEARCH, InfoSource.EXPERT]
+            sources = [InfoSource.CACHE, InfoSource.SPECIALIST, InfoSource.MEMORY, InfoSource.SEARCH, InfoSource.EXPERT]
+        
+        # 0. Try specialist (autonomous logic) first if domain is known
+        domain = kwargs.get("domain")
+        if InfoSource.SPECIALIST in sources and domain:
+            specialist_result = await self._try_specialist(query, domain)
+            if specialist_result and specialist_result.confidence >= 0.8:
+                return specialist_result
         
         # 1. Try cache
         if InfoSource.CACHE in sources:
@@ -151,7 +187,7 @@ class InfoBroker:
         if InfoSource.SEARCH in sources and self.search_engine:
             try:
                 search_result = await asyncio.wait_for(
-                    self._try_search(query),
+                    self._try_search(query, volatility=kwargs.get("volatility", "low")),
                     timeout=self.config.search_timeout_seconds
                 )
                 if search_result.confidence >= self.config.search_min_confidence:
@@ -246,7 +282,7 @@ class InfoBroker:
             query=query
         )
     
-    async def _try_search(self, query: str) -> InfoResult:
+    async def _try_search(self, query: str, volatility: str = "low") -> InfoResult:
         """Try web search."""
         if not self.search_engine:
             return InfoResult(
@@ -257,7 +293,7 @@ class InfoBroker:
             )
         
         try:
-            results = self.search_engine.search(query)
+            results = await self.search_engine.search(query, volatility=volatility)
             if results:
                 # Combine top results
                 snippets = [f"[{r.title}]: {r.snippet}" for r in results[:self.config.max_search_results]]
@@ -325,7 +361,30 @@ class InfoBroker:
             query=query
         )
     
-    def _create_fallback(self, query: str) -> InfoResult:
+    async def _try_specialist(self, query: str, domain: str) -> Optional[InfoResult]:
+        """Try autonomous logic specialists."""
+        try:
+            if domain == "temporal":
+                info = self.temporal.parse_date_and_calculate(query)
+                if not info:
+                    # Fallback to general info
+                    now_info = self.temporal.get_current_info()
+                    if "сегодня" in query.lower() or "today" in query.lower():
+                        info = f"Сегодня {now_info['date']}, {now_info['day_of_week_ru']}."
+                
+                if info:
+                    return InfoResult(source=InfoSource.SPECIALIST, data=info, confidence=1.0, query=query)
+            
+            elif domain == "geography":
+                # If query is just a snippet of text, try to extract distance
+                dist = self.geography.extract_distance(query)
+                if dist:
+                    return InfoResult(source=InfoSource.SPECIALIST, data=f"{dist} km", confidence=0.9, query=query)
+            
+            return None
+        except Exception as e:
+            print(f"[InfoBroker] Specialist error: {e}")
+            return None
         """Create a fallback response (admitted uncertainty)."""
         return InfoResult(
             source=InfoSource.FALLBACK,
