@@ -25,7 +25,7 @@ class ShortContextStore:
     - Current system mode
     """
     
-    def __init__(self, max_events: int = 20):
+    def __init__(self, max_events: int = 100):
         self.max_events = max_events
         self.events: deque[ContextEvent] = deque(maxlen=max_events)
         self.active_goal: Optional[str] = None
@@ -47,6 +47,86 @@ class ShortContextStore:
     def set_mode(self, mode: str):
         self.system_mode = mode
 
+    def save(self, filepath: str):
+        """Save context to disk using atomic write."""
+        import json
+        import os
+        
+        data = {
+            "events": [e.to_dict() for e in self.events],
+            "active_goal": self.active_goal,
+            "emotional_state": self.emotional_state,
+            "system_mode": self.system_mode
+        }
+        
+        # Atomic write with retry for Windows locking
+        temp_path = f"{filepath}.tmp"
+        
+        max_retries = 5
+        for i in range(max_retries):
+            try:
+                # Write to temp
+                with open(temp_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                
+                # Atomic replace
+                if os.path.exists(filepath):
+                    os.replace(temp_path, filepath)
+                else:
+                    os.rename(temp_path, filepath)
+                return # Success
+                
+            except PermissionError:
+                # Windows file locking race condition
+                import time
+                time.sleep(0.01 * (i + 1)) # Backoff
+            except Exception as e:
+                print(f"[Context] Save failed: {e}")
+                break
+        
+        # Cleanup if failed
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except:
+                pass
+
+    def load(self, filepath: str):
+        """Load context from disk."""
+        import json
+        import os
+        if not os.path.exists(filepath):
+            return
+            
+        max_retries = 5
+        for i in range(max_retries):
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                break # Success
+            except (PermissionError, json.JSONDecodeError):
+                import time
+                time.sleep(0.01 * (i + 1))
+            except Exception as e:
+                print(f"[Context] Load failed: {e}")
+                return
+        else:
+             print(f"[Context] Load failed after {max_retries} retries")
+             return
+
+        self.active_goal = data.get("active_goal")
+        self.emotional_state = data.get("emotional_state", "neutral")
+        self.system_mode = data.get("system_mode", "normal")
+        
+        self.events.clear()
+        for e_data in data.get("events", []):
+            if isinstance(e_data.get("timestamp"), str):
+                e_data["timestamp"] = datetime.fromisoformat(e_data["timestamp"])
+            self.events.append(ContextEvent(**e_data))
+        # print(f"[Context] Loaded {len(self.events)} events from disk.")
+
 
 class FullContextStore:
     """
@@ -65,6 +145,72 @@ class FullContextStore:
         self.all_events: list[ContextEvent] = []
         self.decisions: list[DecisionObject] = []
         self.states: list[dict] = []
+
+    def save(self, filepath: str):
+        """Atomic save with Windows lock handling."""
+        import json
+        import os
+        import tempfile
+        import time
+
+        data = {
+            "all_events": [e.to_dict() for e in self.all_events],
+            "decisions": [d.to_dict() for d in self.decisions],
+            "states": self.states
+        }
+
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
+
+        max_retries = 5
+        for i in range(max_retries):
+            try:
+                fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(filepath), suffix=".tmp")
+                with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+                
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                os.rename(temp_path, filepath)
+                return
+            except Exception as e:
+                if i == max_retries - 1:
+                    print(f"[FullStore] Final save attempt failed: {e}")
+                time.sleep(0.01 * (i + 1))
+
+    def load(self, filepath: str):
+        """Atomic load with Windows lock handling."""
+        import json
+        import os
+        import time
+
+        if not os.path.exists(filepath):
+            return
+
+        max_retries = 5
+        data = None
+        for i in range(max_retries):
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                break
+            except Exception as e:
+                if i == max_retries - 1:
+                    print(f"[FullStore] Final load attempt failed: {e}")
+                    return
+                time.sleep(0.01 * (i + 1))
+        
+        if not data:
+            return
+
+        self.all_events = []
+        for e_data in data.get("all_events", []):
+            if isinstance(e_data.get("timestamp"), str):
+                e_data["timestamp"] = datetime.fromisoformat(e_data["timestamp"])
+            self.all_events.append(ContextEvent(**e_data))
+        
+        # Decisions and states loading could be added here if needed for recall
+        self.states = data.get("states", [])
     
     def add_event(self, event: ContextEvent):
         self.all_events.append(event)
@@ -136,7 +282,28 @@ class MemoryGate:
         sorted_events = sorted(filtered, key=score, reverse=True)
         
         # Limit to max
-        return sorted_events[:self.max_context_events]
+        selected = sorted_events[:self.max_context_events]
+        
+        # CRITICAL: Re-sort by timestamp to preserve conversation flow
+        # The LLM needs Chronological order, not importance order
+        selected.sort(key=lambda e: e.timestamp)
+        
+        # Deduplicate repetitive system responses
+        # Loop backwards and remove adjacent duplicates from the SAME source (system_response)
+        if len(selected) > 1:
+            deduped = []
+            prev = None
+            for event in selected:
+                if event.event_type == "system_response" and prev and prev.event_type == "system_response":
+                     # Check for near-identical content (simple string match for now)
+                     if event.content.strip() == prev.content.strip():
+                         continue # Skip duplicate
+                
+                deduped.append(event)
+                prev = event
+            selected = deduped
+        
+        return selected
 
     def rank_facts(self, facts: list[LongTermFact], query: str) -> list[LongTermFact]:
         """Rank long-term facts based on relevance to query."""
@@ -183,9 +350,14 @@ class ContextManager:
         self.memory_gate = MemoryGate()
         self.long_term_facts: list[LongTermFact] = []
         self.storage_path = storage_path
+        self.full_storage_path = storage_path.replace(".json", "_full.json") if storage_path else None
         
-        # Load facts if storage_path is provided (future)
-        
+        # Load stores if paths are provided
+        if self.storage_path:
+             self.short_store.load(self.storage_path)
+             if self.full_storage_path:
+                 self.full_store.load(self.full_storage_path)
+             
     def add_fact(self, content: str, entities: list[str] = None, importance: float = 0.8):
         """Add a distilled fact to long-term memory."""
         fact = LongTermFact(
@@ -210,6 +382,11 @@ class ContextManager:
         )
         self.short_store.add_event(event)
         self.full_store.add_event(event)
+        
+        if self.storage_path:
+            self.short_store.save(self.storage_path)
+            if self.full_storage_path:
+                self.full_store.save(self.full_storage_path)
     
     def record_system_response(self, response: str, importance: float = 0.5):
         """Record system response."""
@@ -221,6 +398,11 @@ class ContextManager:
         )
         self.short_store.add_event(event)
         self.full_store.add_event(event)
+
+        if self.storage_path:
+            self.short_store.save(self.storage_path)
+            if self.full_storage_path:
+                self.full_store.save(self.full_storage_path)
     
     def record_expert_output(self, expert_type: str, output: str, importance: float = 0.4):
         """Record expert output."""
@@ -247,6 +429,10 @@ class ContextManager:
         
         This is filtered by Memory Gate.
         """
+        # Sync with disk to ensure we have latest data from other workers/processes
+        if self.storage_path:
+             self.short_store.load(self.storage_path)
+
         # Get recent events from short store
         recent = self.short_store.get_recent_events(20)
         
@@ -294,7 +480,7 @@ class ContextManager:
     def get_scoped_context(
         self,
         scope: ContextScope,
-        n_recent: int = 5,
+        n_recent: int = 20,
         semantic_filter: Optional[str] = None
     ) -> Optional[dict]:
         """
@@ -315,7 +501,7 @@ class ContextManager:
             return None
         
         elif scope == ContextScope.RECENT:
-            events = self.short_store.get_recent_events(n_recent)
+            events = self.short_store.get_recent_events(n_recent) 
             return {
                 "recent_events": [e.to_dict() for e in events],
                 "active_goal": self.short_store.active_goal
@@ -323,10 +509,16 @@ class ContextManager:
         
         elif scope == ContextScope.RELEVANT:
             facts = self.search_facts(semantic_filter or "")
+            # Increased from 20 to 50 for deeper recall
+            events = self.short_store.get_recent_events(50) 
             return {
                 "relevant_facts": [f.to_dict() for f in facts],
+                "recent_events": [e.to_dict() for e in events],
                 "query": semantic_filter
             }
         
         elif scope == ContextScope.FULL:
+            # Sync full store before retrieval
+            if self.full_storage_path:
+                self.full_store.load(self.full_storage_path)
             return self.get_full_context()

@@ -100,6 +100,16 @@ class OperationalModule:
         from core.intent_router import IntentRouter
         self.intent_router = IntentRouter(llm)
         
+        # NEW: Initialize Specialist Broker
+        from core.specialist_broker import SpecialistBroker
+        from core.specialists.movie_specialist import MovieSpecialist
+        
+        self.specialist_broker = SpecialistBroker()
+        
+        # Check if we have search engine available to pass to movie specialist
+        search_engine = getattr(self, 'search_engine', None)
+        self.specialist_broker.register(MovieSpecialist(search_engine=search_engine))
+        
         # Phase 6: SRA Specialist
         from core.sra_specialist import SRASpecialist
         self.sra = SRASpecialist(llm=tool_caller or llm)
@@ -118,6 +128,53 @@ class OperationalModule:
         - Raw trace for Learning Decoder
         """
         start_time = time.time()
+        
+        # ========================================
+        # PHASE 0: SPECIALIST BROKER (Smart Path)
+        # ========================================
+        # Ask broker if we have a specialist for this
+        specialist = self.specialist_broker.get_selection(context_slice.user_input, threshold=0.8)
+        
+        if specialist:
+            tracer.add_step("specialist_broker", "Selected", f"Routing to {specialist.metadata.name}")
+            print(f"[OM] Specialist Broker selected: {specialist.metadata.name}")
+            
+            try:
+                # Execute specialist
+                result = await specialist.execute(context_slice.user_input)
+                tracer.add_step(specialist.metadata.id, "Execute", "Specialist finished", data_out=str(result))
+                
+                # Feedback Loop (Assume success if we got data)
+                success = result.data is not None and "Error" not in str(result.data)
+                self.specialist_broker.feedback(specialist.metadata.id, success)
+                
+                # Use result as final response (wrapped)
+                final_response = f"[{specialist.metadata.name}] {result.data}"
+                
+                # Return early with DecisionObject
+                elapsed_ms = int((time.time() - start_time) * 1000)
+                
+                decision = DecisionObject(
+                    action="respond",
+                    confidence=result.confidence,
+                    depth_used=DecisionDepth.FAST,
+                    cost={"time_ms": elapsed_ms, "specialist": specialist.metadata.name},
+                    intent="specialist_handled",
+                    reasoning=f"Handled by {specialist.metadata.name}"
+                )
+                
+                trace = RawTrace(
+                    user_input=context_slice.user_input,
+                    final_response=final_response,
+                    decision=decision.to_dict()
+                )
+                
+                return final_response, decision, trace
+                
+            except Exception as e:
+                print(f"[OM] Specialist failed: {e}")
+                self.specialist_broker.feedback(specialist.metadata.id, success=False)
+                # Fallthrough to normal LLM path
         
         # Step 1: Classify intent and determine depth
         tracer.add_step("intent_router", "Classify", f"Classifying user input: {context_slice.user_input[:50]}...")
@@ -574,8 +631,7 @@ User: {context.user_input}"""
         if context.long_term_context:
             context_str = context.long_term_context + "\n" + context_str
 
-        prompt = f"""[TODAY'S DATE: {current_date_str}]
-Context:
+        prompt = f"""Context:
 {context_str}
 
 Current goal: {context.active_goal or 'None'}
@@ -583,10 +639,12 @@ User state: {context.emotional_state}
 
 User message: {context.user_input}"""
         
+        # Add date to system prompt instead
+        system_prompt = f"{SELF_IDENTITY}\nToday is {current_date_str}.\nYou are a helpful assistant. Do NOT output internal module logs. Check your response for naturalness."
+
         return await self.llm.generate(
             prompt=prompt,
-            # Add constraint to NOT output internal logs
-            system_prompt=f"{SELF_IDENTITY}\nYou are a helpful assistant. Do NOT output internal module logs (like 'OperationalModule:'). Check your response for naturalness.",
+            system_prompt=system_prompt,
             temperature=0.6
         )
     

@@ -14,6 +14,12 @@ import json
 import time
 
 import sys
+import io
+
+# Force UTF-8 for stdout/stderr (Windows fix)
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', line_buffering=True)
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 from models.schemas import PolicySpace, WorldState, ContextScope
@@ -85,7 +91,9 @@ class CognitiveSystemWeb:
         self.policy = PolicySpace()
         self.history_store = UserHistoryStore()
         self.gatekeeper = Gatekeeper(self.history_store)
-        self.context_manager = ContextManager()
+        # Ensure data directory exists
+        Path("data").mkdir(exist_ok=True)
+        self.context_manager = ContextManager(storage_path="data/context_store.json")
         
         # NEW: Initialize Orchestrator
         self.orchestrator = Orchestrator(default_timeout=30.0)

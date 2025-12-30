@@ -281,12 +281,12 @@ class TaskOrchestrator:
                 ))
         
         elif intent == "recall":
-            # Memory recall (needs relevant facts)
+            # Memory recall (needs ALL facts and history)
             tasks.append(Task(
                 task_type="llm_medium",
                 payload={"query": context.user_input},
-                context_scope=ContextScope.RELEVANT,
-                context_filter=context.user_input,  # Search facts by query
+                context_scope=ContextScope.FULL,  # Upgraded to FULL for deep memory
+                context_filter=context.user_input, 
                 priority=Priority.HIGH,
                 source_module="orchestrator",
                 target_module="llm"
@@ -419,7 +419,8 @@ class TaskOrchestrator:
             # Build prompt with injected context
             context_str = ""
             if context.get("recent_events"):
-                for event in context["recent_events"][-3:]:
+                # Increased from 3 to 10 for better continuity
+                for event in context["recent_events"][-10:]:
                     context_str += f"[{event.get('event_type', 'unknown')}] {event.get('content', '')}\n"
             
             prompt = f"{context_str}\nUser: {query}" if context_str else query
@@ -442,6 +443,15 @@ class TaskOrchestrator:
                 data_out={"response": response}
             )
             
+            # Safety check for immediate repetition loop
+            try:
+                last_response = next((e.content for e in reversed(context.get("recent_events", [])) if e.get("event_type") == "system_response"), None)
+                if last_response and response.strip() == last_response.strip():
+                     print(f"[TaskOrchestrator] Repetition loop detected! Modifying response.")
+                     response += " (As I mentioned previously)"
+            except Exception as e:
+                print(f"[TaskOrchestrator] Repetition check failed: {e}")
+
             return TaskResult(
                 task_id=task.task_id,
                 success=True,
@@ -466,6 +476,11 @@ class TaskOrchestrator:
             if context.get("recent_events"):
                 events_str = "\n".join([f"[{e.get('event_type')}] {e.get('content')}" for e in context["recent_events"]])
                 context_parts.append(f"Recent conversation:\n{events_str}")
+            
+            if context.get("all_events"):
+                # Handle FULL scope history
+                all_events_str = "\n".join([f"[{e.get('event_type')}] {e.get('content')}" for e in context["all_events"][-50:]])
+                context_parts.append(f"FULL Conversation History (Last 50 events):\n{all_events_str}")
             
             # Add structured problem data if available
             prob_data = task.payload.get("problem_data", {})
@@ -528,6 +543,15 @@ class TaskOrchestrator:
                 data_out={"response": response}
             )
             
+            # Safety check for immediate repetition loop
+            try:
+                last_response = next((e.content for e in reversed(context.get("recent_events", [])) if e.get("event_type") == "system_response"), None)
+                if last_response and response.strip() == last_response.strip():
+                     print(f"[TaskOrchestrator] Repetition loop detected! Modifying response.")
+                     response += " (As I mentioned previously)"
+            except Exception as e:
+                print(f"[TaskOrchestrator] Repetition check failed: {e}")
+
             return TaskResult(
                 task_id=task.task_id,
                 success=True,
@@ -576,7 +600,8 @@ class TaskOrchestrator:
             context_str = f"Today's date: {current_date_str}\n"
             
             if context.get("all_events"):
-                for event in context["all_events"][-5:]:
+                # Increased from 5 to 15 for experts
+                for event in context["all_events"][-15:]:
                     context_str += f"[{event.get('event_type')}] {event.get('content')}\n"
             
             # Call appropriate expert with world_state

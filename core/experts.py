@@ -445,7 +445,11 @@ Output structure:
 
 [FINAL SYNTHESIS]
 (Clear, evidence-based answer)
-MANDATORY: Respond in the same language as the ORIGINAL QUERY (e.g. Russian, Ukrainian).
+MANDATORY RULES:
+1. Respond in the same language as the ORIGINAL QUERY (e.g. Russian, Ukrainian).
+2. DO NOT mention "experts", "perspectives", "sources vary", or "analysis".
+3. DO NOT say "The creative expert suggests..." or "The conservative view is...".
+4. Just give the answer as a coherent, unified persona (Omega).
 """
 
 

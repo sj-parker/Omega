@@ -7,6 +7,6 @@ models:
 
 # System settings
 system:
-  reflection_interval: 45.0
+  reflection_interval: 450.0
   user_id_default: "user1"
   port: 8000

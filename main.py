@@ -3,10 +3,15 @@
 # Refactored with Orchestrator, InfoBroker, and Safety Layer
 
 import asyncio
+import sys
+import io
 from pathlib import Path
 
+# Force UTF-8 for stdout/stderr (Windows fix)
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', line_buffering=True)
+
 # Add project root to path
-import sys
 sys.path.insert(0, str(Path(__file__).parent))
 
 from models.schemas import PolicySpace, WorldState

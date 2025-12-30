@@ -1,0 +1,167 @@
+{
+  "events": [
+    {
+      "timestamp": "2025-12-30T21:34:47.072244",
+      "event_type": "user_input",
+      "content": "Message 80",
+      "importance": 0.9,
+      "metadata": {},
+      "tags": []
+    },
+    {
+      "timestamp": "2025-12-30T21:34:47.102403",
+      "event_type": "user_input",
+      "content": "Message 81",
+      "importance": 0.9,
+      "metadata": {},
+      "tags": []
+    },
+    {
+      "timestamp": "2025-12-30T21:34:47.118386",
+      "event_type": "user_input",
+      "content": "Message 82",
+      "importance": 0.9,
+      "metadata": {},
+      "tags": []
+    },
+    {
+      "timestamp": "2025-12-30T21:34:47.133892",
+      "event_type": "user_input",
+      "content": "Message 83",
+      "importance": 0.9,
+      "metadata": {},
+      "tags": []
+    },
+    {
+      "timestamp": "2025-12-30T21:34:47.164535",
+      "event_type": "user_input",
+      "content": "Message 84",
+      "importance": 0.9,
+      "metadata": {},
+      "tags": []
+    },
+    {
+      "timestamp": "2025-12-30T21:34:47.179574",
+      "event_type": "user_input",
+      "content": "Message 85",
+      "importance": 0.9,
+      "metadata": {},
+      "tags": []
+    },
+    {
+      "timestamp": "2025-12-30T21:34:47.195103",
+      "event_type": "user_input",
+      "content": "Message 86",
+      "importance": 0.9,
+      "metadata": {},
+      "tags": []
+    },
+    {
+      "timestamp": "2025-12-30T21:34:47.210706",
+      "event_type": "user_input",
+      "content": "Message 87",
+      "importance": 0.9,
+      "metadata": {},
+      "tags": []
+    },
+    {
+      "timestamp": "2025-12-30T21:34:47.226300",
+      "event_type": "user_input",
+      "content": "Message 88",
+      "importance": 0.9,
+      "metadata": {},
+      "tags": []
+    },
+    {
+      "timestamp": "2025-12-30T21:34:47.257451",
+      "event_type": "user_input",
+      "content": "Message 89",
+      "importance": 0.9,
+      "metadata": {},
+      "tags": []
+    },
+    {
+      "timestamp": "2025-12-30T21:34:47.273452",
+      "event_type": "user_input",
+      "content": "Message 90",
+      "importance": 0.9,
+      "metadata": {},
+      "tags": []
+    },
+    {
+      "timestamp": "2025-12-30T21:34:47.304530",
+      "event_type": "user_input",
+      "content": "Message 91",
+      "importance": 0.9,
+      "metadata": {},
+      "tags": []
+    },
+    {
+      "timestamp": "2025-12-30T21:34:47.320217",
+      "event_type": "user_input",
+      "content": "Message 92",
+      "importance": 0.9,
+      "metadata": {},
+      "tags": []
+    },
+    {
+      "timestamp": "2025-12-30T21:34:47.352353",
+      "event_type": "user_input",
+      "content": "Message 93",
+      "importance": 0.9,
+      "metadata": {},
+      "tags": []
+    },
+    {
+      "timestamp": "2025-12-30T21:34:47.382913",
+      "event_type": "user_input",
+      "content": "Message 94",
+      "importance": 0.9,
+      "metadata": {},
+      "tags": []
+    },
+    {
+      "timestamp": "2025-12-30T21:34:47.398179",
+      "event_type": "user_input",
+      "content": "Message 95",
+      "importance": 0.9,
+      "metadata": {},
+      "tags": []
+    },
+    {
+      "timestamp": "2025-12-30T21:34:47.413925",
+      "event_type": "user_input",
+      "content": "Message 96",
+      "importance": 0.9,
+      "metadata": {},
+      "tags": []
+    },
+    {
+      "timestamp": "2025-12-30T21:34:47.429927",
+      "event_type": "user_input",
+      "content": "Message 97",
+      "importance": 0.9,
+      "metadata": {},
+      "tags": []
+    },
+    {
+      "timestamp": "2025-12-30T21:34:47.460564",
+      "event_type": "user_input",
+      "content": "Message 98",
+      "importance": 0.9,
+      "metadata": {},
+      "tags": []
+    },
+    {
+      "timestamp": "2025-12-30T21:34:47.476565",
+      "event_type": "user_input",
+      "content": "Message 99",
+      "importance": 0.9,
+      "metadata": {},
+      "tags": []
+    }
+  ],
+  "active_goal": null,
+  "emotional_state": "neutral",
+  "system_mode": "normal"
+}

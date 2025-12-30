@@ -12,6 +12,8 @@ Omega is an advanced cognitive architecture for Large Language Models (LLMs), de
 - **Automated Trip Planning**: Built-in geographical detection for "A to B" travel and distance retrieval
 - **Deterministic Simulation**: Code-based FSM/Math solver prevents LLM "guessing" in priority problems
 - **Self-Learning**: Periodic reflection extracts patterns and auto-tunes cognitive policies
+- **Repetition Prevention**: Automated detection of loops and context pruning to ensure dynamic responses
+- **Robust Context**: Time-aware context deduplication to prevent sticky session states
 
 ### Architecture Highlights
 | Component | Purpose |
