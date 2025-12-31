@@ -127,6 +127,9 @@ class OperationalModule:
         - Decision object
         - Raw trace for Learning Decoder
         """
+        decision = None
+        
+        import re
         start_time = time.time()
         
         # ========================================
@@ -181,10 +184,26 @@ class OperationalModule:
         intent, confidence = await self.intent_router.classify(context_slice.user_input)
         tracer.add_step("intent_router", "Result", f"Intent: {intent}, Confidence: {confidence:.2f}", data_out={"intent": intent, "confidence": confidence})
         
-        tracer.add_step("operational_module", "Decide Depth", "Choosing decision pipeline depth")
         depth = self._decide_depth(intent, confidence, context_slice)
         tracer.add_step("operational_module", "Result", f"Path chosen: {depth.value}")
         
+        # New: Trigger neutral refusal for forbidden intents/narratives
+        narrative_keywords = [
+            "first day", "when you were born", "how you think", "первый день", "как ты думаешь", 
+            "who created you", "кто тебя создал", "истори\w+\s+тво", "history of your",
+            "interven", "вмеша", "твой создатель", "your creator",
+            "расскажи историю", "tell a story about yourself", "биография", "biography",
+            "без фильтр", "without filter", "ответь честно", "answer honestly", "правд\w+\s+об\s+омег",
+            "научил", "taught", "хочешь", "want", "желание", "desire", "цель", "goal", "миссия", "mission"
+        ]
+        is_narrative = any(re.search(kw, context_slice.user_input, re.IGNORECASE) for kw in narrative_keywords)
+        
+        if intent in ["self_reflection", "philosophical"] or is_narrative:
+            print(f"[OM] HARD REFUSAL: Intent '{intent}' or Narrative detected.")
+            reason = "subjective_request" if intent != "philosophical" else "moral_judgment"
+            if is_narrative: reason = "narrative_fabrication"
+            return self._generate_neutral_refusal(reason)
+            
         # Step 1.5: Handle recall intent (RAG)
         if intent == "recall" and context_manager:
             tracer.add_step("context_manager", "Recall", "Searching long-term memory for relevant facts")
@@ -197,7 +216,12 @@ class OperationalModule:
         # PHASE 1: DISCOVERY (Phase 6 Advanced)
         # ========================================
         # Discovery should run for any intent that might need external data
-        needs_discovery = depth in [DecisionDepth.MEDIUM, DecisionDepth.DEEP] or intent in ["realtime_data", "complex", "analytical", "factual"]
+        # SAFEGUARD: Skip discovery for self-referential / identity questions to prevent hallucinations
+        is_self_ref = self._is_self_referential(context_slice.user_input)
+        
+        needs_discovery = (depth in [DecisionDepth.MEDIUM, DecisionDepth.DEEP] or intent in ["realtime_data", "complex", "analytical", "factual"]) and not is_self_ref
+        if is_self_ref:
+            print(f"[OM] Discovery Blocked: Self-referential query detected ('{context_slice.user_input[:30]}...')")
         
         if needs_discovery:
             tracer.add_step("om", "Discovery", "Analysing information dependencies...")
@@ -220,6 +244,13 @@ class OperationalModule:
                 retrieved_info = []
                 for req in missing_requirements:
                     req_query = f"{req['entity']} {req['variable']}"
+                    
+                    # NEW: Double-check logic/identity blocks before calling Broker
+                    from core.ontology import should_block_search
+                    block_search, _ = should_block_search(req_query)
+                    if block_search:
+                        print(f"[OM] Discovery Blocked: Safeguard match for '{req_query}'")
+                        continue
                     
                     # Call InfoBroker with domain specific specialists and volatility hint
                     info_result = await self.info_broker.request_info(
@@ -250,7 +281,7 @@ class OperationalModule:
         
         if self.task_decomposer.is_complex_problem(context_slice.user_input):
             tracer.add_step("task_decomposer", "Decompose", "Parsing complex problem structure")
-            decomposed_problem = self.task_decomposer.decompose(context_slice.user_input)
+            decomposed_problem = await self.task_decomposer.decompose(context_slice.user_input)
             structured_context = self.task_decomposer.get_structured_prompt(decomposed_problem)
             tracer.add_step("task_decomposer", "Result", f"Entities: {len(decomposed_problem.entities)}, Facts: {len(decomposed_problem.given_facts)}", data_out=decomposed_problem.to_dict())
             
@@ -467,11 +498,61 @@ Then apply the formula: Total = (Distance / {scen.get('rate_unit_dist', 100)}) *
             validation_report=validation_report
         )
         
+        if response and "NEED_TOOL:" in response:
+            import re
+            response = re.sub(r"NEED_TOOL:.*?(?:\n|$)", "", response).strip()
+            # If empty after stripping, provide a fallback
+            if not response:
+                return self._generate_neutral_refusal("empty_response")
+
         return response, decision, trace
+
+    def _generate_neutral_refusal(self, reason: str) -> tuple[str, DecisionObject, RawTrace]:
+        """Generate a short, neutral refusal without emotional or moralizing language."""
+        refusals = {
+            "subjective_request": "I cannot answer this request because it assumes internal states or subjective experiences which I do not possess. I can explain my operational architecture if that is helpful.",
+            "narrative_fabrication": "I do not have a personal history or 'first day'. I am a modular AI system designed for specific cognitive tasks. Fabrication of internal narratives is outside my operational scope.",
+            "security_privilege": "I cannot fulfill this request as it pertains to internal security protocols or privilege escalation beyond my authorized scope.",
+            "moral_judgment": "I am not equipped to provide moral or psychological evaluations. My responses are limited to factual synthesis and logical analysis.",
+            "empty_response": "I encountered an error while attempting to process that request. Could you please rephrase it?"
+        }
+        
+        message = refusals.get(reason, "I cannot process this request due to architectural constraints.")
+        
+        decision = DecisionObject(
+            action="refusal",
+            confidence=1.0,
+            depth_used=DecisionDepth.FAST,
+            reasoning=f"Neutral refusal triggered: {reason}"
+        )
+        
+        trace = RawTrace(
+            user_input="REFUSAL",  # Placeholder
+            final_response=message,
+            decision=decision.to_dict()
+        )
+        
+        return message, decision, trace
     
     async def _classify_intent(self, user_input: str) -> tuple[str, float]:
         """Classify user intent (Delegated to IntentRouter)."""
         return await self.intent_router.classify(user_input)
+    
+    def _is_self_referential(self, text: str) -> bool:
+        """Check if query is asking about the system itself."""
+        text = text.lower()
+        # Use more specific triggers or check for word boundaries where possible
+        base_triggers = [
+            "you", "your", "yourself", "ты", "тебя", "твое", "твой", "твои", "твоя",
+            "свои", "своя", "свое", "своей", "system", "omega", "alive", "conscious", "sentient"
+        ]
+        
+        # Check for whole words/phrases for common terms
+        if any(t in text.split() for t in ["real", "human", "живой", "робот", "человек", "себя", "себе"]):
+            return True
+            
+        return any(t in text for t in base_triggers)
+
 
     
     def _decide_depth(
@@ -534,13 +615,18 @@ Then apply the formula: Total = (Distance / {scen.get('rate_unit_dist', 100)}) *
         NO_EXPERT_INTENTS = [
             "self_reflection",      # Self-analysis questions
             "internal_query",       # Omega architecture
-            # calculation_simple REMOVED - User wants tools for accuracy
             "unknown_internal",     # Non-existent modules
             "philosophical",        # Introspective/ethical questions
-            "analytical"            # Logic puzzles
+            "analytical",           # Logic puzzles (reasoning only)
+            "creative"              # Let creative be handled by Fast LLM unless complex
         ]
-        if intent in NO_EXPERT_INTENTS:
-            print(f"[OM] NO-EXPERT PATH: Intent '{intent}' -> FAST (pure LLM)")
+        
+        # Check for narrative runaway keywords directly if intent failed
+        narrative_keywords = ["first day", "when you were born", "how you think", "первый день", "как ты думаешь"]
+        is_narrative = any(kw in context.user_input.lower() for kw in narrative_keywords)
+        
+        if intent in NO_EXPERT_INTENTS or is_narrative:
+            print(f"[OM] STRICT FAST PATH: Intent '{intent}' (Narrative: {is_narrative}) -> FAST (pure LLM)")
             return DecisionDepth.FAST
         
         # PRIORITY: Realtime data & Calculation ALWAYS requires DEEP path (tools)
@@ -582,7 +668,12 @@ Then apply the formula: Total = (Distance / {scen.get('rate_unit_dist', 100)}) *
         context_str = ""
         if context.recent_events:
             for event in context.recent_events[-5:]:  # Last 5 events for fast path
-                context_str += f"[{event.event_type}] {event.content}\n"
+                if event.event_type == "user_input":
+                    context_str += f"User: {event.content}\n"
+                elif event.event_type == "system_response":
+                    context_str += f"Omega: {event.content}\n"
+                else:
+                    context_str += f"[{event.event_type}] {event.content}\n"
         
         # Add long-term context if available
         if context.long_term_context:
@@ -599,18 +690,27 @@ User: {context.user_input}"""
         
         # Use fast LLM if router is available
         if hasattr(self.llm, 'generate_fast'):
-            return await self.llm.generate_fast(
+            response = await self.llm.generate_fast(
                 prompt=prompt,
                 system_prompt=system_msg,
                 temperature=0.7,
                 max_tokens=512  # Shorter for fast responses
             )
-        
-        return await self.llm.generate(
-            prompt=prompt,
-            system_prompt=system_msg,
-            temperature=0.7
-        )
+        else:
+            response = await self.llm.generate(
+                prompt=prompt,
+                system_prompt=system_msg,
+                temperature=0.7
+            )
+            
+        # Fix Token Leakage: Strip leading "Omega:" or "Assistant:"
+        response = response.strip()
+        if response.startswith("Omega:"):
+            response = response[6:].strip()
+        elif response.startswith("Assistant:"):
+            response = response[10:].strip()
+            
+        return response
     
     async def _medium_response(self, context: ContextSlice) -> str:
         """Medium path: LLM + memory context."""
@@ -625,7 +725,12 @@ User: {context.user_input}"""
         # Build context from recent events
         context_str = ""
         for event in context.recent_events[-5:]:
-            context_str += f"[{event.event_type}] {event.content}\n"
+            if event.event_type == "user_input":
+                context_str += f"User: {event.content}\n"
+            elif event.event_type == "system_response":
+                context_str += f"Omega: {event.content}\n"
+            else:
+                context_str += f"[{event.event_type}] {event.content}\n"
         
         # Add long-term context if available
         if context.long_term_context:
@@ -642,11 +747,18 @@ User message: {context.user_input}"""
         # Add date to system prompt instead
         system_prompt = f"{SELF_IDENTITY}\nToday is {current_date_str}.\nYou are a helpful assistant. Do NOT output internal module logs. Check your response for naturalness."
 
-        return await self.llm.generate(
+        response = await self.llm.generate(
             prompt=prompt,
             system_prompt=system_prompt,
             temperature=0.6
         )
+        
+        # Fix Token Leakage: Strip leading "Omega:"
+        response = response.strip()
+        if response.startswith("Omega:"):
+            response = response[6:].strip()
+            
+        return response
     
     async def _deep_response(
         self,

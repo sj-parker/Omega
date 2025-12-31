@@ -14,6 +14,10 @@ from models.schemas import (
 )
 from core.task_queue import Task, TaskQueue, TaskResult, Priority
 from core.tracer import tracer
+from core.specialist_broker import SpecialistBroker
+from core.specialists.movie_specialist import MovieSpecialist
+from core.specialists.identity_specialist import GeneralIdentitySpecialist
+
 
 if TYPE_CHECKING:
     from core.context_manager import ContextManager
@@ -56,7 +60,13 @@ class TaskOrchestrator:
         
         # Initialize Critic for expert response selection
         from core.experts import CriticModule
+        from core.experts import CriticModule
         self.critic = CriticModule(llm)
+        
+        # Initialize SpecialistBroker and register specialists
+        self.specialist_broker = SpecialistBroker()
+        self.specialist_broker.register(MovieSpecialist(llm))
+        self.specialist_broker.register(GeneralIdentitySpecialist())
         
         # Task Queue
         self.task_queue = TaskQueue(max_concurrent=3)
@@ -604,7 +614,38 @@ class TaskOrchestrator:
                 for event in context["all_events"][-15:]:
                     context_str += f"[{event.get('event_type')}] {event.get('content')}\n"
             
-            # Call appropriate expert with world_state
+            # 1. Try Specialist Broker first
+            specialist = self.specialist_broker.get_selection(query)
+            if specialist:
+                print(f"[TaskOrchestrator] Using specialist: {specialist.metadata.name}")
+                rec = await specialist.execute(query, context=context)
+                
+                # If result is just data/instruction, we might still need to format it via LLM or return as "thought"
+                # For now, let's treat the 'data' as the response if it's a string, or format it.
+                response_text = str(rec.data)
+                if isinstance(rec.data, dict) and "instruction" in rec.data:
+                     # Specialized instruction case (like Identity specialist)
+                     # We must generate a response adhering to this instruction
+                     prompt = f"{context_str}\n\nUSER QUERY: {query}\n\nINSTRUCTION: {rec.data['instruction']}\n\nRespond to the user:"
+                     response_text = await self.llm.generate(prompt=prompt, temperature=0.7)
+
+                tracer.add_step(
+                    module=f"specialist_{specialist.metadata.id}",
+                    name="Execute",
+                    description=f"Executed {specialist.metadata.name}",
+                    data_in={"query": query},
+                    data_out={"response": response_text}
+                )
+                
+                return TaskResult(
+                    task_id=task.task_id,
+                    success=True,
+                    data={"expert": specialist.metadata.id, "response": response_text},
+                    source_module=f"specialist_{specialist.metadata.id}",
+                    steps=[s.to_dict() for s in steps]
+                )
+
+            # 2. Fallback to legacy Experts
             response = await self.experts.consult_expert(
                 expert_type=expert_type,
                 prompt=query,

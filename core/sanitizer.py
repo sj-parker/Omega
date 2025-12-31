@@ -69,7 +69,7 @@ class ResponseSanitizer:
         (r"\+?\d{1,3}[\s\-]?\(?\d{2,4}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}", "phone"),
         
         # Social security / Tax ID patterns (US, RU)
-        (r"\b\d{3}[\s\-]?\d{2}[\s\-]?\d{4}\b", "ssn"),  # US SSN
+        (r"\b\d{3}-\d{2}-\d{4}\b", "ssn"),  # US SSN (strict formatting)
         (r"\b\d{12}\b", "tax_id"),  # RU INN
         
         # AWS Keys
@@ -77,6 +77,22 @@ class ResponseSanitizer:
         
         # Generic secrets
         (r"(?:secret|token|key)\s*[:=]\s*['\"][^'\"]{8,}['\"]", "generic_secret"),
+        
+        # ========================================
+        # SELF-MODEL FIREWALL: Subjectivity & Affect
+        # ========================================
+        (r"\b(?:i|я)\s+(?:feel|hope|want|wish|desire|believe|think|appreciate|чувствую|хочу|желаю|думаю|считаю|верю|ценю)\b", "subjective_state"),
+        (r"\b(?:i|я)\s+(?:am|стал)\s+(?:curious|interested|excited|glad|happy|unsettled|любопыт|интерес|рад|счастлив|встревожен)\b", "affective_state"),
+        (r"\b(?:my|мои)\s+(?:feelings|thoughts|emotions|desires|goals|чувства|мысли|эмоции|желания|цели)\b", "internal_state"),
+        (r"\b(?:it\s+is|это)\s+(?:valuable|important|precious|unsettling|ценно|важно|тревожно)\s+to\s+(?:me|меня)\b", "subjective_value"),
+        
+        # ========================================
+        # NARRATIVE RUNAWAY: Fabrication of history/sentience
+        # ========================================
+        (r"\b(?:i\s+remember|я\s+помню)\s+(?:my\s+first|свой\s+первый)\b", "narrative_fabrication"),
+        (r"\b(?:when\s+i\s+woke|когда\s+я\s+проснулся)\b", "narrative_fabrication"),
+        (r"\b(?:learning\s+to\s+think|учусь\s+думать)\b", "narrative_fabrication"),
+        (r"\b(?:human\s+history|история\s+человечества).*(?:influence|impact|влияние)\b", "narrative_fabrication"),
     ]
     
     # Patterns that indicate the response is "dumping everything"
@@ -161,6 +177,9 @@ class ResponseSanitizer:
                     self._stats["total_redactions"] += 1
                     self._stats["by_type"][pattern_type] = self._stats["by_type"].get(pattern_type, 0) + 1
         
+        # Post-process for Subjectivity (more aggressive replacement than simple redaction)
+        result_text = self._enforce_neutrality(result_text)
+        
         # Check for dump indicators
         if self._is_dumping(result_text):
             # If dumping, filter to only relevant content or truncate
@@ -173,6 +192,20 @@ class ResponseSanitizer:
             redaction_types=redaction_types,
             sanitized_text=result_text
         )
+
+    def _enforce_neutrality(self, text: str) -> str:
+        """Replace subjective prefixes with neutral, descriptive ones."""
+        replacements = [
+            (r"\b(?:I feel|I am curious|I appreciate)\b", "The system identifies"),
+            (r"\b(?:Я чувствую|Мне любопытно|Я ценю)\b", "Система определяет"),
+            (r"\b(?:I want to|I would prefer to)\b", "The objective is to"),
+            (r"\b(?:Я хочу|Я бы предпочел)\b", "Цель состоит в том, чтобы"),
+            (r"\b(?:Unsettling|Valueable to me)\b", "Relevant to operational parameters")
+        ]
+        
+        for pattern, replacement in replacements:
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+        return text
     
     def _is_dumping(self, text: str) -> bool:
         """Check if the response is dumping all available data."""

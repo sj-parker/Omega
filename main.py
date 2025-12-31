@@ -5,6 +5,7 @@
 import asyncio
 import sys
 import io
+import uuid
 from pathlib import Path
 
 # Force UTF-8 for stdout/stderr (Windows fix)

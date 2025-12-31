@@ -40,7 +40,7 @@ class Subtask:
             "type": self.task_type.value,
             "description": self.description,
             "depends_on": self.depends_on,
-            "given_data": self.given_data,
+            "depends_on": self.depends_on,
             "missing_data": self.missing_data,
             "status": self.status,
             "result": self.result

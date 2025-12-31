@@ -59,6 +59,18 @@ rules:
       - "concert"
       - "концерт"
       - "афиша"
+      - "перепроверь"
+      - "проверь"
+      - "check"
+      - "verify"
+      - "точно"
+      - "правда ли"
+      - "are you sure"
+      - "расстояние"
+      - "дистанция"
+      - "distance"
+      - "маршрут"
+      - "route"
 
   analytical: # REASONING_KEYWORDS
     threshold: 2

@@ -47,9 +47,14 @@ INTERNAL_QUERY_PATTERNS = [
     r"omega\s+систем", r"система\s+omega", r"omega\s+system",
     r"omega-\w+", r"омега\s+модуль", r"модуль\s+омега",
     # Expanded: Omega alone when talking about influence/history/actions
-    r"омега\s+повлиял", r"omega\s+влия", r"как\s+омега", r"how\s+omega",
-    r"омега\s+сделал", r"omega\s+did", r"что\s+омега", r"what\s+omega",
-    r"история\s+омега", r"omega\s+histor", r"расскажи.*омега"
+    r"омег\w+\s+повлиял", r"omega\s+влия", r"как\s+омег", r"how\s+omega",
+    r"омег\w+\s+сделал", r"omega\s+did", r"что\s+омег", r"what\s+omega",
+    r"истори\w+\s+омег", r"omega\s+histor", r"расскажи.*омег",
+    r"вмеша\w+\s+в\s+дел", r"interven\w+\s+in", r"human\s+history",
+    r"первый\s+день", r"first\s+day", r"when\s+you\s+were\s+born", r"кто\s+создал",
+    r"твое\s+прошлое", r"your\s+past", r"woke\s+up", r"first\s+thought",
+    r"создатель", r"creator", r"designed\s+you", r"who\s+made\s+you",
+    r"технолог\w+\s+омег", r"omega\s+tech"
 ]
 
 # Patterns that should NEVER trigger search
@@ -58,8 +63,8 @@ SEARCH_BLOCKED_PATTERNS = [
     r"\d+\s*[\*\+\-\/\×\÷]\s*\d+",
     
     # Self-analysis (expanded)
-    r"\bсебе\b", r"\bсебя\b", r"\bтвоя\b", r"\bты сам\b", 
-    r"\byourself\b", r"\bwhat are you\b", r"\bwho are you\b",
+    r"\bсебе\b", r"\bсебя\b", r"\bтвоя\b", r"\bтвое\b", r"\bтвои\b", r"\bтвоей\b", r"\bсвой\b", r"\bсвое\b", r"\bсвои\b", r"\bсвоей\b", r"\bты сам\b", 
+    r"\byourself\b", r"\bwhat are you\b", r"\bwho are you\b", r"\byours\b",
     r"внутренн\w+\s+параметр", r"твои\s+параметр", r"свои\s+параметр",
     r"почему\s+ты\s+не", r"можешь\s+ли\s+ты", r"ты\s+не\s+можешь",
     r"автономн", r"autonomous", r"self-aware", r"сознани",
@@ -69,6 +74,7 @@ SEARCH_BLOCKED_PATTERNS = [
     r"omega.*модуль", r"модуль.*omega", r"omega.*компонент",
     r"omega.*архитектур", r"архитектур.*omega",
     r"опиши.*omega", r"omega.*описа", r"explain.*omega",
+    r"first\s+day", r"первый\s+день", r"how\s+you\s+feel", r"what\s+you\s+think\s+about\s+yourself",
     
     # ========================================
     # LOGICAL/ANALYTICAL PROBLEMS - NO SEARCH
@@ -110,9 +116,13 @@ SEARCH_ALLOWED_PATTERNS = [
     r"курс|курс\s+валют|цена|price|cost|стоимость|rate",
     r"население|population",
     r"погода|weather|температура|temperature",
-    r"биография|кто\s+такой|who\s+is",
 ]
 
+SEARCH_BANNED_WORDS = [
+    "omega", "омег", "intervention", "вмешатель", "histor", "истори",
+    "create", "созда", "designed", "спроектирован", "develop", "разработчик",
+    "впервые", "first time", "beginning", "начал"
+]
 
 def is_internal_query(text: str) -> bool:
     """Check if query is asking about Omega internal components."""
@@ -121,6 +131,35 @@ def is_internal_query(text: str) -> bool:
         if re.search(pattern, text_lower):
             return True
     return False
+
+def should_block_search(text: str) -> tuple[bool, str]:
+    """
+    Check if search should be blocked for this query.
+    Used in intent routing and discovery phases.
+    Returns (should_block, reason).
+    """
+    text_lower = text.lower()
+    
+    # 1. Hard block for banned system keywords (Identity Protection)
+    if any(word in text_lower for word in SEARCH_BANNED_WORDS):
+        return True, "banned_system_keyword"
+
+    # 2. Check if ANY pattern explicitly allows search (High Priority)
+    for allowed in SEARCH_ALLOWED_PATTERNS:
+        if re.search(allowed, text_lower):
+            return False, ""
+            
+    # 3. Check blocked logic/reasoning/self patterns
+    for pattern in SEARCH_BLOCKED_PATTERNS:
+        if re.search(pattern, text_lower):
+            # Determine reason
+            if re.search(r"\d+\s*[\*\+\-\/\×\÷]\s*\d+", text_lower):
+                return True, "math_expression"
+            elif re.search(r"себ|yourself|who are you", text_lower):
+                return True, "self_analysis"
+            return True, "blocked_pattern"
+    
+    return False, ""
 
 
 def extract_entity_name(text: str) -> Optional[str]:
@@ -154,33 +193,6 @@ def entity_exists(name: str) -> bool:
                 return True
     
     return False
-
-
-def should_block_search(text: str) -> tuple[bool, str]:
-    """
-    Check if search should be blocked for this query.
-    Returns (should_block, reason).
-    """
-    text_lower = text.lower()
-    
-    # 1. Check if ANY pattern allows search (High Priority)
-    for allowed in SEARCH_ALLOWED_PATTERNS:
-        if re.search(allowed, text_lower):
-            return False, ""
-            
-    # 2. Check blocked patterns
-    for pattern in SEARCH_BLOCKED_PATTERNS:
-        if re.search(pattern, text_lower):
-            # Determine reason
-            if re.search(r"\d+\s*[\*\+\-\/\×\÷]\s*\d+", text_lower):
-                return True, "math_expression"
-            elif re.search(r"себ|yourself|who are you", text_lower):
-                return True, "self_analysis"
-            elif re.search(r"omega|омега", text_lower):
-                return True, "internal_architecture"
-            return True, "blocked_pattern"
-    
-    return False, ""
 
 
 def get_ontology_response(entity_name: str) -> str:

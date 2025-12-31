@@ -360,6 +360,14 @@ class ContextManager:
              
     def add_fact(self, content: str, entities: list[str] = None, importance: float = 0.8):
         """Add a distilled fact to long-term memory."""
+        # CRITICAL: Do NOT store facts about Omega's history or internal states
+        # This prevents 'Narrative Runaway' from being persisted.
+        banned_terms = ["omega", "омега", "intervention", "вмешательство", "history", "история"]
+        content_lower = content.lower()
+        if any(term in content_lower for term in banned_terms):
+            print(f"[KM] Fact rejected (Narrative Protection): {content[:50]}...")
+            return
+
         fact = LongTermFact(
             content=content,
             entities=entities or [],
