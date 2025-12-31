@@ -2,6 +2,7 @@
 models:
   main: "gemma3:latest"
   fast: "gemma3:1b"
+  search: "qwen2.5:7b"
   use_ollama: true
   use_multi_model: true
 

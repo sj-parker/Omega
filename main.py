@@ -57,12 +57,14 @@ class CognitiveSystem:
         use_ollama: bool = None,
         main_model: str = None,
         fast_model: str = None,
+        search_model: str = None,
         use_multi_model: bool = None
     ):
         # Load from config or use provided values
         self.use_ollama = use_ollama if use_ollama is not None else config.get("models.use_ollama")
         self.main_model = main_model if main_model is not None else config.get("models.main")
         self.fast_model = fast_model if fast_model is not None else config.get("models.fast")
+        self.search_model = search_model if search_model is not None else config.get("models.search", "qwen2.5:7b")
         self.use_multi_model = use_multi_model if use_multi_model is not None else config.get("models.use_multi_model")
 
         # Initialize LLM(s)
@@ -77,8 +79,13 @@ class CognitiveSystem:
                 # Single model
                 self.llm = OllamaLLM(model=self.main_model)
                 print(f"[LLM] Single model: {self.main_model}")
+            
+            # Specialized search/regex model (Qwen)
+            self.search_llm = OllamaLLM(model=self.search_model)
+            print(f"[LLM] Search model: {self.search_model}")
         else:
             self.llm = MockLLM()
+            self.search_llm = MockLLM()
         
         # For reflection and learning - ALWAYS use main LLM
         # This prevents learning from preferring fast (low-quality) model
@@ -113,7 +120,8 @@ class CognitiveSystem:
             policy=self.policy,
             info_broker=self.info_broker,
             sanitizer=self.sanitizer,
-            fallback_generator=self.fallback_generator
+            fallback_generator=self.fallback_generator,
+            search_llm=self.search_llm
         )
         
         # Complete InfoBroker setup

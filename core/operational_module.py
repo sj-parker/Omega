@@ -69,7 +69,8 @@ class OperationalModule:
         # NEW: Modular components
         info_broker: Optional['InfoBroker'] = None,
         sanitizer: Optional['ResponseSanitizer'] = None,
-        fallback_generator: Optional['FallbackGenerator'] = None
+        fallback_generator: Optional['FallbackGenerator'] = None,
+        search_llm: Optional[LLMInterface] = None
     ):
         self.llm = llm
         self.policy = policy or PolicySpace()
@@ -94,7 +95,7 @@ class OperationalModule:
         # Expose search_engine for InfoBroker setup
         if hasattr(self.experts, 'llm'):
             from core.search_engine import SearchEngine
-            self.search_engine = SearchEngine()
+            self.search_engine = SearchEngine(llm=search_llm or llm)
         
         # Initialize Intent Router
         from core.intent_router import IntentRouter

@@ -282,8 +282,8 @@ class InfoBroker:
             query=query
         )
     
-    async def _try_search(self, query: str, volatility: str = "low") -> InfoResult:
-        """Try web search."""
+    async def _try_search(self, query: str, volatility: str = "low", target: str = None) -> InfoResult:
+        """Try web search with optional high-precision extraction."""
         if not self.search_engine:
             return InfoResult(
                 source=InfoSource.SEARCH,
@@ -293,13 +293,26 @@ class InfoBroker:
             )
         
         try:
+            # Use high-precision extraction if target is available
+            if target:
+                result = await self.search_engine.search_and_extract(query, target, volatility=volatility)
+                return InfoResult(
+                    source=InfoSource.SEARCH,
+                    data=result["fact"],
+                    confidence=result["confidence"],
+                    query=query,
+                    metadata={
+                        "source": result["source"],
+                        "method": result.get("method", "legacy")
+                    }
+                )
+
+            # Standard search
             results = await self.search_engine.search(query, volatility=volatility)
             if results:
-                # Combine top results
                 snippets = [f"[{r.title}]: {r.snippet}" for r in results[:self.config.max_search_results]]
                 combined = "\n\n".join(snippets)
                 
-                # Confidence based on result quality
                 has_digits = any(c.isdigit() for c in combined)
                 confidence = 0.8 if has_digits else 0.65
                 

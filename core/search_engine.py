@@ -18,9 +18,10 @@ class SearchEngine:
     Search Engine using DuckDuckGo backend.
     """
     
-    def __init__(self, max_results: int = 3):
+    def __init__(self, max_results: int = 3, llm: Optional['LLMInterface'] = None):
         self.max_results = max_results
         self.ddgs = DDGS()
+        self.llm = llm
         
     async def search(self, query: str, volatility: str = "low") -> List[SearchResult]:
         """Perform a text search with temporal awareness."""
@@ -139,22 +140,114 @@ class SearchEngine:
     async def search_and_extract(self, query: str, target: str, volatility: str = "low") -> dict:
         """
         Search and try to extract a specific target (fact).
-        Returns dict with fact, confidence, and source URL.
+        Uses Qwen-guided Regex for high precision if LLM is available.
         """
         from core.tracer import tracer
         
         results = await self.search(query, volatility=volatility)
+        
+        # New High-Precision Flow (Qwen + Regex)
+        if self.llm and target and target.lower() not in ["none", "unknown"]:
+            return await self._high_precision_extract(query, target, results)
+        
+        # Original Keyword-based Fallback
+        return self._legacy_extract(query, target, results)
+
+    async def _high_precision_extract(self, query: str, target: str, results: List[SearchResult]) -> dict:
+        """LLM-guided regex extraction for high precision data."""
+        from core.tracer import tracer
+        
+        # 1. Generate Regex patterns using Qwen
+        patterns = await self._generate_extraction_patterns(query, target)
+        tracer.add_step("search_engine", "Extraction Patterns", f"Using {len(patterns)} patterns for: {target}", data_out={"patterns": patterns})
+        
+        best_fact = None
+        best_source = None
+        best_score = 0
+        
+        for res in results:
+            snippet = res.snippet
+            score = 0
+            found_matches = []
+            
+            for p in patterns:
+                try:
+                    match = re.search(p, snippet, re.IGNORECASE)
+                    if match:
+                        score += 5
+                        # If the pattern has a group, extract it as the fact
+                        match_text = match.group(1) if match.groups() else match.group(0)
+                        found_matches.append(match_text)
+                except Exception as e:
+                    print(f"[SearchEngine] Invalid regex generated: {p} - {e}")
+            
+            if score > best_score:
+                best_score = score
+                # Combine matches for the snippet
+                best_fact = " | ".join(found_matches)
+                best_source = res.url
+        
+        if best_fact:
+            return {
+                "fact": best_fact,
+                "confidence": 0.9 if best_score > 5 else 0.7,
+                "source": best_source,
+                "method": "qwen_regex"
+            }
+            
+        # Fallback to legacy if regex found nothing
+        return self._legacy_extract(query, target, results)
+
+    async def _generate_extraction_patterns(self, query: str, target: str) -> List[str]:
+        """Ask Qwen to provide 2-3 regex patterns for the target data."""
+        if not self.llm:
+            return []
+            
+        prompt = f"""Task: Generate 2-3 Python Regular Expressions (regex) to extract the following information from text snippets.
+Target: {target}
+Original Query: {query}
+
+Instructions:
+- Return ONLY a JSON list of strings.
+- Each string must be a valid Python regex.
+- Use named or un-named groups if you want to capture specific values (e.g. currency amounts).
+- Keep regexes robust but specific.
+
+Example:
+Target: "Price of Bitcoin"
+Output: ["\$([0-9,.]+)", "BTC:\s*([0-9,.]+)", "([0-9,.]+)\s*USD"]
+
+JSON Response:"""
+
+        try:
+            response = await self.llm.generate(
+                prompt=prompt,
+                system_prompt="You are a Regex Architect. Return only JSON lists.",
+                temperature=0.1
+            )
+            # Parse JSON
+            import json
+            clean_res = response.strip()
+            if "```json" in clean_res:
+                clean_res = clean_res.split("```json")[1].split("```")[0].strip()
+            elif "```" in clean_res:
+                clean_res = clean_res.split("```")[1].split("```")[0].strip()
+            
+            patterns = json.loads(clean_res)
+            return patterns if isinstance(patterns, list) else []
+        except Exception as e:
+            print(f"[SearchEngine] Pattern generation error: {e}")
+            return []
+
+    def _legacy_extract(self, query: str, target: str, results: List[SearchResult]) -> dict:
+        """The original keyword-based extraction logic."""
+        # [Implementation moves from search_and_extract here]
         best_fact = None
         best_source = None
         
-        # Domains to exclude for factual queries
         BAD_DOMAINS = ["dictionary.cambridge.org", "merriam-webster.com", "thesaurus.com", "facebook.com", "twitter.com"]
-        
-        # Keywords that indicate "Straight line" vs "Road"
         STRAIGHT_LINE_KWS = ["по прямой", "straight line", "air distance", "as the crow flies", "vector"]
         ROAD_KWS = ["по дорогам", "на машине", "road", "driving", "route", "маршрут", "трасса"]
-        
-        # Targets that MUST have numbers to be valid (Language agnostic)
         NUMERIC_TARGETS = ["price", "rate", "value", "cost", "weather", "temp", "temperature", "humidity", "bitcoin", "eth", 
                           "цена", "стоимость", "дистанция", "расстояние", "время", "км", "km"]
         
@@ -166,15 +259,11 @@ class SearchEngine:
             snippet = res.snippet
             snippet_low = snippet.lower()
             target_low = target.lower()
-            
-            # Scoring snippet quality
             score = 0
             
-            # 1. Target keyword match
             if target_low in snippet_low:
                 score += 5
             
-            # 2. Number presence for numeric targets
             has_digits = any(c.isdigit() for c in snippet)
             if any(nt in target_low for nt in NUMERIC_TARGETS):
                 if has_digits:
@@ -182,18 +271,14 @@ class SearchEngine:
                 else:
                     score -= 5
             
-            # 3. Road vs Straight line logic
             is_road_query = any(rk in query.lower() for rk in ROAD_KWS)
             has_straight_kws = any(sk in snippet_low for sk in STRAIGHT_LINE_KWS)
             has_road_kws = any(rk in snippet_low for rk in ROAD_KWS)
             
             if is_road_query:
-                if has_road_kws:
-                    score += 7
-                if has_straight_kws:
-                    score -= 10 # Strong penalty for straight-line results in road query
+                if has_road_kws: score += 7
+                if has_straight_kws: score -= 10
             
-            # 4. Units presence (km, км, h, ч)
             UNITS = ["км", "km", "час", "hour", "мин", "min"]
             if any(u in snippet_low for u in UNITS):
                 score += 3
@@ -201,24 +286,21 @@ class SearchEngine:
             candidates.append((score, res))
         
         if candidates:
-            # Sort by score (desc)
             candidates.sort(key=lambda x: x[0], reverse=True)
             best_score, best_res = candidates[0]
-            
             best_fact = best_res.snippet
             best_source = best_res.url
             confidence = 0.8 if best_score > 5 else 0.5
         else:
-            best_fact = "No relevant information found in search results. Please try a different query."
+            best_fact = "No relevant information found in search results."
             confidence = 0.0
             best_source = "N/A"
-        
-        tracer.add_step("search_engine", "Result", f"Found info for: {query[:50]}...", data_out={"fact": best_fact[:200] if best_fact else None, "source": best_source})
         
         return {
             "fact": best_fact,
             "confidence": confidence,
-            "source": best_source
+            "source": best_source,
+            "method": "legacy_keywords"
         }
 
     async def verify_fact(self, fact: str, original_source: str, volatility: str = "low") -> dict:
